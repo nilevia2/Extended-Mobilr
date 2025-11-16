@@ -3,6 +3,9 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'dart:io';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 import 'core/extended_public_client.dart';
 import 'core/local_store.dart';
@@ -23,6 +26,15 @@ const double _fsSubtitle = 12;
 const double _fsNumbers = 14;
 const double _trailingFraction = 0.40;
 const double _starAreaWidth = 32; // reserved width for star so header aligns with rows
+
+// Shared disk cache for SVG logos
+final CacheManager _logoCache = CacheManager(
+  Config(
+    'extended_logo_cache',
+    stalePeriod: const Duration(days: 30),
+    maxNrOfCacheObjects: 300,
+  ),
+);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,7 +72,7 @@ class ExtendedApp extends StatelessWidget {
           foregroundColor: _colorTextMain,
           elevation: 0,
         ),
-        dividerColor: Colors.white12,
+        dividerColor: _colorBg,
         textTheme: const TextTheme(
           bodyMedium: TextStyle(color: _colorTextMain),
           bodySmall: TextStyle(color: _colorTextSecondary),
@@ -210,8 +222,6 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
             Tab(text: 'Watchlist'),
           ],
         ),
-        // Thin, darker divider under tabs
-        Container(height: 1, color: _colorBlack.withOpacity(0.6)),
         Expanded(
           child: TabBarView(
             controller: _tabController,
@@ -445,17 +455,9 @@ class TradePage extends StatelessWidget {
 
 // Try to resolve a logo URL for common assets; fallback to null.
 String? _logoUrl(String symbol) {
-  final s = symbol.toUpperCase();
-  // Only use known stable URLs to avoid 404s; otherwise fall back to initials.
-  const map = {
-    'BTC': 'https://assets.coincap.io/assets/icons/btc@2x.png',
-    'ETH': 'https://assets.coincap.io/assets/icons/eth@2x.png',
-    'SOL': 'https://assets.coincap.io/assets/icons/sol@2x.png',
-    'ZEC': 'https://assets.coincap.io/assets/icons/zec@2x.png',
-    'STRK': 'https://assets.coincap.io/assets/icons/strk@2x.png',
-  };
-  if (map.containsKey(s)) return map[s];
-  return null;
+  final s = symbol.trim().toUpperCase();
+  // Extended CDN SVGs by asset name, e.g., https://cdn.extended.exchange/crypto/BTC.svg
+  return 'https://cdn.extended.exchange/crypto/$s.svg';
 }
 
 class _ErrorReload extends StatelessWidget {
@@ -512,19 +514,34 @@ class _MarketAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final letter = symbol.isNotEmpty ? symbol.substring(0, 1).toUpperCase() : '?';
-    if (logoUrl == null) {
-      return CircleAvatar(child: Text(letter));
-    }
+    final url = logoUrl;
+    const size = 40.0;
+    if (url == null || url.isEmpty) return CircleAvatar(child: Text(letter));
+
     return CircleAvatar(
       backgroundColor: Colors.transparent,
+      radius: size / 2,
       child: ClipOval(
-        child: CachedNetworkImage(
-          imageUrl: logoUrl!,
-          width: 40,
-          height: 40,
-          fit: BoxFit.cover,
-          errorWidget: (_, __, ___) => CircleAvatar(child: Text(letter)),
-          placeholder: (_, __) => const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
+        child: FutureBuilder<File>(
+          future: _logoCache.getSingleFile(url),
+          builder: (context, snap) {
+            if (snap.hasData && snap.data != null) {
+              return SvgPicture.file(
+                snap.data!,
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+              );
+            }
+            if (snap.hasError) {
+              return Center(child: Text(letter));
+            }
+            return const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            );
+          },
         ),
       ),
     );
