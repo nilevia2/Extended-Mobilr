@@ -1,12 +1,27 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'config.dart';
 
 class BackendClient {
   final Dio _dio = Dio(BaseOptions(
     baseUrl: AppConfig.apiBaseUrl,
-    connectTimeout: const Duration(seconds: 10),
-    receiveTimeout: const Duration(seconds: 20),
+    connectTimeout: const Duration(seconds: 30),
+    receiveTimeout: const Duration(seconds: 60),
   ));
+  
+  BackendClient() {
+    // Log the base URL for debugging
+    debugPrint('[BackendClient] Base URL: ${AppConfig.apiBaseUrl}');
+    // Add error interceptor for better debugging
+    _dio.interceptors.add(InterceptorsWrapper(
+      onError: (error, handler) {
+        debugPrint('[BackendClient] Error: ${error.message}');
+        debugPrint('[BackendClient] Request: ${error.requestOptions.uri}');
+        debugPrint('[BackendClient] Response: ${error.response?.statusCode} ${error.response?.data}');
+        handler.next(error);
+      },
+    ));
+  }
 
   Future<Map<String, dynamic>> startSession(String walletAddress) async {
     final res = await _dio.post('/session/start', data: {
@@ -92,6 +107,81 @@ class BackendClient {
       'reduce_only': reduceOnly,
       'time_in_force': timeInForce,
       'use_mainnet': useMainnet,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> onboardingStart({
+    required String walletAddress,
+    int accountIndex = 0,
+  }) async {
+    final res = await _dio.post('/onboarding/start', data: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> onboardingComplete({
+    required String walletAddress,
+    required String signature,
+    required String registrationSignature,
+    required String registrationTime,
+    required String registrationHost,
+    int accountIndex = 0,
+  }) async {
+    final res = await _dio.post('/onboarding/complete', data: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+      'l1_signature': signature,
+      'registration_signature': registrationSignature,
+      'registration_time': registrationTime,
+      'registration_host': registrationHost,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> apiKeyPrepare({
+    required String walletAddress,
+    required int accountIndex,
+  }) async {
+    final res = await _dio.post('/accounts/api-key/prepare', data: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> apiKeyIssue({
+    required String walletAddress,
+    required int accountIndex,
+    required String accountsAuthTime,
+    required String accountsSignature,
+    required String createAuthTime,
+    required String createSignature,
+    String description = 'mobile trading key',
+  }) async {
+    final res = await _dio.post('/accounts/api-key/issue', data: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+      'accounts_auth_time': accountsAuthTime,
+      'accounts_signature': accountsSignature,
+      'create_auth_time': createAuthTime,
+      'create_signature': createSignature,
+      'description': description,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> setReferralCode({
+    required String walletAddress,
+    required int accountIndex,
+    required String code,
+  }) async {
+    final res = await _dio.post('/referral', data: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+      'code': code,
     });
     return Map<String, dynamic>.from(res.data);
   }

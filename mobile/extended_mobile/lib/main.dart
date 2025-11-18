@@ -1,14 +1,22 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:ui';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import 'core/extended_public_client.dart';
 import 'core/local_store.dart';
+import 'core/wallet_connect.dart';
+import 'core/backend_client.dart';
 
 // Extended theme palette
 const _colorGreenPrimary = Color(0xFF00BC84);
@@ -38,6 +46,21 @@ final CacheManager _logoCache = CacheManager(
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Global error handling to prevent app crashes
+  FlutterError.onError = (FlutterErrorDetails details) {
+    debugPrint('[FLUTTER_ERROR] ${details.exception}');
+    debugPrint('[FLUTTER_ERROR] Stack: ${details.stack}');
+    // Don't crash - just log
+  };
+  
+  // Handle platform errors
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('[PLATFORM_ERROR] $error');
+    debugPrint('[PLATFORM_ERROR] Stack: $stack');
+    return true; // Handled, don't crash
+  };
+  
   await dotenv.load(fileName: 'assets/env');
   // Warm up shared_preferences channel to avoid early plugin channel errors on Android.
   try {
@@ -46,8 +69,43 @@ Future<void> main() async {
   runApp(const ProviderScope(child: ExtendedApp()));
 }
 
-class ExtendedApp extends StatelessWidget {
+class ExtendedApp extends StatefulWidget {
   const ExtendedApp({super.key});
+
+  @override
+  State<ExtendedApp> createState() => _ExtendedAppState();
+}
+
+class _ExtendedAppState extends State<ExtendedApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    debugPrint('[APP] Lifecycle changed: $state');
+    // Keep app alive when returning from wallet
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('[APP] App resumed from background - WalletConnect should handle response');
+      // Give WalletConnect time to process any pending responses
+      Future.delayed(const Duration(milliseconds: 500), () {
+        debugPrint('[APP] Resumed delay complete');
+      });
+    } else if (state == AppLifecycleState.paused) {
+      debugPrint('[APP] App paused - going to background (likely opening wallet)');
+    } else if (state == AppLifecycleState.inactive) {
+      debugPrint('[APP] App inactive - transitioning');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -433,11 +491,646 @@ class PortfolioPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: FilledButton(
-        onPressed: () {},
-        child: const Text('Connect Wallet'),
+    return const _PortfolioBody();
+  }
+}
+
+class _PortfolioBody extends ConsumerStatefulWidget {
+  const _PortfolioBody();
+
+  @override
+  ConsumerState<_PortfolioBody> createState() => _PortfolioBodyState();
+}
+
+class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
+  String _balances = '';
+  bool _loading = false;
+  String? _lastWcUri;
+  bool _onboarding = false;
+  bool _savingApiKey = false;
+  String? _cachedApiKey;
+  bool _autoIssuing = false;
+
+  Future<void> _connectWallet() async {
+    final svc = ref.read(walletServiceProvider);
+    final uri = await svc.connect();
+    if (uri != null) {
+      _lastWcUri = uri.toString();
+      bool launched = false;
+      // Prefer wallet-specific deep links or universal link for better compatibility
+      final encoded = Uri.encodeComponent(_lastWcUri!);
+      final candidates = <Uri>[
+        Uri.parse('metamask://wc?uri=$encoded'),
+        Uri.parse('trust://wc?uri=$encoded'),
+        Uri.parse('rainbow://wc?uri=$encoded'),
+        Uri.parse('https://link.walletconnect.com/?uri=$encoded'),
+        uri, // fallback to raw wc: URI
+      ];
+      for (final target in candidates) {
+        try {
+          if (await canLaunchUrl(target)) {
+            launched = await launchUrl(target, mode: LaunchMode.externalApplication);
+            if (launched) break;
+          }
+        } catch (_) {}
+      }
+      if (!launched && mounted) _showWalletConnectQr(_lastWcUri!);
+    }
+  }
+
+  Future<void> _connectWalletQr() async {
+    if (_lastWcUri == null) {
+      final svc = ref.read(walletServiceProvider);
+      final uri = await svc.connect();
+      if (uri != null) _lastWcUri = uri.toString();
+    }
+    if (_lastWcUri != null && mounted) _showWalletConnectQr(_lastWcUri!);
+  }
+
+  void _showWalletConnectQr(String uri) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _colorBgElevated,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
+      builder: (_) {
+        return Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Scan with your wallet to connect', style: TextStyle(color: _colorTextMain, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _colorBlack,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: QrImageView(
+                  data: uri,
+                  version: QrVersions.auto,
+                  size: 220,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'If your wallet is on another device, scan this code to approve the session.',
+                style: const TextStyle(color: _colorTextSecondary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _disconnect() async {
+    final svc = ref.read(walletServiceProvider);
+    await svc.disconnect();
+    setState(() {
+      _balances = '';
+    });
+  }
+
+  Future<void> _fetchBalances() async {
+    final svc = ref.read(walletServiceProvider);
+    final address = svc.address;
+    if (address == null) return;
+    setState(() => _loading = true);
+    try {
+      // Check for API key first - don't auto-issue here to avoid duplicate signatures
+      final apiKey = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
+      if (apiKey == null || apiKey.isEmpty) {
+        debugPrint('[BALANCES] No API key found');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('API key required. Please complete onboarding first.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        return;
+      }
+      
+      final api = BackendClient();
+      debugPrint('[BALANCES] Fetching balances for $address');
+      final res = await api.getBalances(walletAddress: address, accountIndex: 0);
+      setState(() => _balances = res.toString());
+      debugPrint('[BALANCES] Success');
+    } catch (e) {
+      debugPrint('[BALANCES] Error: $e');
+      if (!mounted) return;
+      final msg = e.toString();
+      if (msg.contains('status code of 401') || msg.contains('401')) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Authentication failed. Please complete onboarding to get an API key.'),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to fetch balances: ${msg.length > 80 ? msg.substring(0, 80) + "..." : msg}'),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // Ensure WC core is initialized
+    Future.microtask(() => ref.read(walletServiceProvider).init());
+    _loadCachedApiKeyIfAny();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final svc = ref.watch(walletServiceProvider);
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  svc.isConnected ? 'Wallet: ${svc.address}' : 'No wallet connected',
+                  style: const TextStyle(color: _colorTextMain),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (svc.isConnected) ...[
+                OutlinedButton(onPressed: _disconnect, child: const Text('Disconnect')),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: _savingApiKey ? null : () => _promptAndSaveApiKey(),
+                  child: _savingApiKey
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Set API Key'),
+                ),
+              ] else ...[
+                FilledButton(
+                  onPressed: svc.isConnecting ? null : _connectWallet,
+                  child: svc.isConnecting
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Connect'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(onPressed: _connectWalletQr, child: const Text('Show QR')),
+              ],
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (svc.isConnected) ...[
+            FilledButton.tonal(
+              onPressed: _onboarding ? null : _startOnboarding,
+              child: _onboarding
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Onboard (Sign & Attach)'),
+            ),
+            const SizedBox(height: 16),
+          ],
+          FilledButton(
+            onPressed: svc.isConnected && !_loading ? _fetchBalances : null,
+            child: _loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Fetch Balances'),
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _colorBgElevated,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: SingleChildScrollView(
+                child: Text(
+                  _balances.isEmpty ? 'No balances loaded' : _balances,
+                  style: const TextStyle(color: _colorTextMain),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _startOnboarding() async {
+    final svc = ref.read(walletServiceProvider);
+    final address = svc.address;
+    if (address == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Wallet not connected')));
+      }
+      return;
+    }
+    setState(() => _onboarding = true);
+    try {
+      debugPrint('[ONBOARD] Starting onboarding for $address');
+      final api = BackendClient();
+      debugPrint('[ONBOARD] Calling /onboarding/start');
+      final start = await api.onboardingStart(walletAddress: address, accountIndex: 0);
+      debugPrint('[ONBOARD] Got start response: ${start.keys}');
+      final typed = Map<String, dynamic>.from(start['typed_data'] as Map);
+      final regTyped = Map<String, dynamic>.from(start['registration_typed_data'] as Map);
+      // Ensure session is still active before signing
+      if (svc.topic == null) {
+        throw StateError('WalletConnect session lost. Please reconnect your wallet.');
+      }
+      debugPrint('[ONBOARD] WalletConnect topic: ${svc.topic}');
+      
+      // Request first signature - WalletConnect will automatically try to open wallet
+      debugPrint('[ONBOARD] Requesting first signature (AccountCreation)');
+      String? sigCreation;
+      try {
+        sigCreation = await svc
+            .signTypedDataV4(address: address, typedData: typed, autoOpenWallet: true)
+            .timeout(const Duration(seconds: 90), onTimeout: () {
+          debugPrint('[ONBOARD] First signature request timed out');
+          throw TimeoutException('Wallet did not respond. Please check your wallet app and approve the signature request.');
+        });
+        debugPrint('[ONBOARD] Got first signature successfully');
+      } catch (e) {
+        debugPrint('[ONBOARD] First signature error: $e');
+        // If app was in background, wait a bit and check if signature came through
+        await Future.delayed(const Duration(seconds: 2));
+        // Session check removed - can't access private _wc field
+        debugPrint('[ONBOARD] Will retry signature request');
+        rethrow;
+      }
+      
+      // WalletConnect will automatically try to open wallet when sending the request
+      // Give a small delay for the app to return to foreground after first signature
+      debugPrint('[ONBOARD] Got first signature, waiting briefly before second signature');
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      // Request second signature - WalletConnect will attempt to open wallet automatically
+      debugPrint('[ONBOARD] Requesting second signature (AccountRegistration)');
+      String? sigRegistration;
+      try {
+        sigRegistration = await svc
+            .signTypedDataV4(address: address, typedData: regTyped, autoOpenWallet: true)
+            .timeout(const Duration(seconds: 90), onTimeout: () {
+          debugPrint('[ONBOARD] Second signature request timed out');
+          throw TimeoutException('Wallet did not respond. Please check your wallet app and approve the signature request.');
+        });
+        debugPrint('[ONBOARD] Got second signature successfully');
+      } catch (e) {
+        debugPrint('[ONBOARD] Second signature error: $e');
+        // If app was in background, wait a bit
+        await Future.delayed(const Duration(seconds: 2));
+        rethrow;
+      }
+      
+      if (sigCreation == null || sigRegistration == null) {
+        throw Exception('Failed to get both signatures');
+      }
+      debugPrint('[ONBOARD] Got both signatures, calling /onboarding/complete');
+      await api.onboardingComplete(
+        walletAddress: address,
+        signature: sigCreation,
+        registrationSignature: sigRegistration,
+        registrationTime: (regTyped['message'] as Map)['time'] as String,
+        registrationHost: (regTyped['message'] as Map)['host'] as String,
+        accountIndex: 0,
+      );
+      debugPrint('[ONBOARD] Onboarding complete');
+      if (!mounted) return;
+      
+      // Show success message first
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account created! Issuing API key...')));
+      }
+      
+      // Auto-issue API key immediately after onboarding
+      debugPrint('[ONBOARD] Issuing API key automatically (requires 2 signatures)');
+      try {
+        await _ensureApiKeyPresent(address);
+        debugPrint('[ONBOARD] API key issued successfully');
+        
+        // Now fetch balances
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('API key ready! Fetching balances...')));
+          try {
+            await _fetchBalances();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete!')));
+            }
+          } catch (e) {
+            debugPrint('[ONBOARD] Failed to fetch balances: $e');
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete! Use "Fetch Balances" to load your data.')));
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[ONBOARD] API key issuance failed: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete, but API key issuance failed. You can retry later.')));
+        }
+      }
+    } catch (e, stack) {
+      debugPrint('[ONBOARD] Error: $e');
+      debugPrint('[ONBOARD] Stack: $stack');
+      
+      // Don't crash - handle gracefully
+      if (!mounted) {
+        debugPrint('[ONBOARD] Widget not mounted, error handled');
+        return;
+      }
+      
+      if (e is TimeoutException) {
+        await _showOpenWalletHelp();
+      }
+      
+      final errorMsg = e.toString();
+      try {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Onboarding failed: ${errorMsg.length > 100 ? errorMsg.substring(0, 100) + "..." : errorMsg}'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      } catch (_) {
+        // If showing snackbar fails, just log
+        debugPrint('[ONBOARD] Could not show error message');
+      }
+    } finally {
+      // Always clear loading state, even if widget is disposed
+      try {
+        if (mounted) {
+          setState(() => _onboarding = false);
+        } else {
+          _onboarding = false;
+        }
+      } catch (_) {
+        debugPrint('[ONBOARD] Could not update state in finally');
+        _onboarding = false;
+      }
+    }
+  }
+
+  Future<void> _ensureApiKeyPresent(String walletAddress) async {
+    // Skip if already issuing to prevent duplicate calls
+    if (_autoIssuing) {
+      debugPrint('[APIKEY] Already issuing, waiting...');
+      // Wait for current issuance to complete (max 3 minutes)
+      int waited = 0;
+      while (_autoIssuing && waited < 180) {
+        await Future.delayed(const Duration(seconds: 1));
+        waited++;
+      }
+      if (_autoIssuing) {
+        debugPrint('[APIKEY] Issuance timed out, checking stored key');
+      }
+    }
+    
+    final existing = await LocalStore.loadApiKey(walletAddress: walletAddress, accountIndex: 0);
+    if (existing == null || existing.isEmpty) {
+      debugPrint('[APIKEY] No existing key, issuing new one');
+      await _autoIssueApiKey();
+    } else {
+      debugPrint('[APIKEY] Found existing key locally, syncing to backend');
+      // Sync to backend in case it was lost
+      try {
+        final api = BackendClient();
+        await api.upsertAccount(walletAddress: walletAddress, accountIndex: 0, apiKey: existing);
+        debugPrint('[APIKEY] Synced API key to backend');
+      } catch (e) {
+        debugPrint('[APIKEY] Warning: Failed to sync API key to backend: $e');
+      }
+      if (mounted) setState(() => _cachedApiKey = existing);
+    }
+  }
+
+  Future<void> _promptAndSaveApiKey() async {
+    final svc = ref.read(walletServiceProvider);
+    final address = svc.address;
+    if (address == null) return;
+    final controller = TextEditingController(text: _cachedApiKey ?? '');
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: _colorBgElevated,
+          title: const Text('Enter Extended API Key', style: TextStyle(color: _colorTextMain)),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'X-Api-Key from Extended',
+              filled: true,
+              fillColor: _colorBlack,
+              border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8)), borderSide: BorderSide.none),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(null), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(ctx).pop(controller.text.trim()), child: const Text('Save')),
+          ],
+        );
+      },
+    );
+    if (result == null) return;
+    final apiKey = result.trim();
+    if (apiKey.isEmpty) return;
+    setState(() => _savingApiKey = true);
+    try {
+      final api = BackendClient();
+      await api.upsertAccount(walletAddress: address, accountIndex: 0, apiKey: apiKey);
+      await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: apiKey);
+      setState(() => _cachedApiKey = apiKey);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('API key saved.')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to save API key: $e')));
+    } finally {
+      if (mounted) setState(() => _savingApiKey = false);
+    }
+  }
+
+  Future<void> _loadCachedApiKeyIfAny() async {
+    final svc = ref.read(walletServiceProvider);
+    final address = svc.address;
+    if (address == null) return;
+    final existing = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
+    if (mounted) setState(() => _cachedApiKey = existing);
+  }
+
+  Future<void> _autoIssueApiKey() async {
+    final svc = ref.read(walletServiceProvider);
+    final address = svc.address;
+    if (address == null) return;
+    if (_autoIssuing) {
+      debugPrint('[APIKEY] Already issuing, skipping');
+      return;
+    }
+    setState(() {
+      _autoIssuing = true;
+      _savingApiKey = true;
+    });
+    try {
+      debugPrint('[APIKEY] Preparing API key issuance');
+      final api = BackendClient();
+      final prep = await api.apiKeyPrepare(walletAddress: address, accountIndex: 0);
+      final accountsMessage = (prep['accounts_message'] ?? '') as String;
+      final accountsTime = (prep['accounts_auth_time'] ?? '') as String;
+      final createMessage = (prep['create_message'] ?? '') as String;
+      final createTime = (prep['create_auth_time'] ?? '') as String;
+      if (accountsMessage.isEmpty || createMessage.isEmpty) {
+        throw Exception('Invalid prepare response');
+      }
+      
+      // Open wallet BEFORE requesting signatures
+      debugPrint('[APIKEY] Opening wallet for API key signatures');
+      await _openAnyWalletApp();
+      await Future.delayed(const Duration(milliseconds: 1500));
+      
+      // Sign both messages sequentially
+      debugPrint('[APIKEY] Requesting first signature (accounts)');
+      final sigAccounts = await svc
+          .personalSign(address: address, message: accountsMessage)
+          .timeout(const Duration(seconds: 90), onTimeout: () {
+        throw TimeoutException('Wallet did not respond to first signature. Please check your wallet app.');
+      });
+      
+      debugPrint('[APIKEY] Got first signature, opening wallet for second');
+      await _openAnyWalletApp();
+      await Future.delayed(const Duration(milliseconds: 1500));
+      
+      debugPrint('[APIKEY] Requesting second signature (create key)');
+      final sigCreate = await svc
+          .personalSign(address: address, message: createMessage)
+          .timeout(const Duration(seconds: 90), onTimeout: () {
+        throw TimeoutException('Wallet did not respond to second signature. Please check your wallet app.');
+      });
+      
+      debugPrint('[APIKEY] Issuing API key with signatures');
+      final issued = await api.apiKeyIssue(
+        walletAddress: address,
+        accountIndex: 0,
+        accountsAuthTime: accountsTime,
+        accountsSignature: sigAccounts,
+        createAuthTime: createTime,
+        createSignature: sigCreate,
+      );
+      final key = (issued['api_key'] ?? '') as String;
+      if (key.isEmpty) throw Exception('No API key returned');
+      
+      debugPrint('[APIKEY] Saving API key locally and to backend');
+      await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
+      // Also save to backend database so it persists
+      try {
+        await api.upsertAccount(walletAddress: address, accountIndex: 0, apiKey: key);
+        debugPrint('[APIKEY] API key saved to backend database');
+      } catch (e) {
+        debugPrint('[APIKEY] Warning: Failed to save API key to backend: $e');
+        // Continue anyway - local storage is primary
+      }
+      if (mounted) setState(() => _cachedApiKey = key);
+      
+      // Set referral/builder code to ADMIN (non-blocking)
+      try {
+        await api.setReferralCode(walletAddress: address, accountIndex: 0, code: 'ADMIN');
+        debugPrint('[APIKEY] Referral code set to ADMIN');
+      } catch (e) {
+        debugPrint('[APIKEY] Failed to set referral code: $e');
+      }
+      
+      debugPrint('[APIKEY] API key issued and saved successfully');
+    } catch (e) {
+      debugPrint('[APIKEY] Error: $e');
+      if (e is TimeoutException) {
+        await _showOpenWalletHelp();
+      }
+      rethrow; // Re-throw so caller can handle
+    } finally {
+      if (mounted) {
+        setState(() {
+          _autoIssuing = false;
+          _savingApiKey = false;
+        });
+      } else {
+        _autoIssuing = false;
+        _savingApiKey = false;
+      }
+    }
+  }
+
+  Future<void> _openAnyWalletApp() async {
+    debugPrint('[WALLET] Attempting to open wallet app');
+    final schemes = [
+      'metamask://',
+      'trust://',
+      'rainbow://',
+    ];
+    bool opened = false;
+    for (final s in schemes) {
+      final u = Uri.parse(s);
+      try {
+        if (await canLaunchUrl(u)) {
+          debugPrint('[WALLET] Opening $s');
+          opened = await launchUrl(u, mode: LaunchMode.externalApplication);
+          if (opened) {
+            debugPrint('[WALLET] Successfully opened $s');
+            return;
+          }
+        }
+      } catch (e) {
+        debugPrint('[WALLET] Failed to open $s: $e');
+      }
+    }
+    if (!opened) {
+      debugPrint('[WALLET] Could not open any wallet app automatically');
+    }
+  }
+
+  Future<void> _showOpenWalletHelp() async {
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: _colorBgElevated,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (_) {
+        return Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Approve in your wallet', style: TextStyle(color: _colorTextMain, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              const Text(
+                'We sent a signing request to your wallet. If you don’t see it, open your wallet app and check pending requests.',
+                style: TextStyle(color: _colorTextSecondary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              FilledButton(
+                onPressed: () async {
+                  await _openAnyWalletApp();
+                  if (Navigator.canPop(context)) Navigator.pop(context);
+                },
+                child: const Text('Open Wallet'),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
     );
   }
 }

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from .routes import session, accounts, proxy, orders
+from .routes import onboarding
 from .storage import STORE  # ensures store is initialized (DB or memory)
 
 
@@ -11,5 +12,6 @@ app.include_router(session.router, prefix="/session", tags=["session"])
 app.include_router(accounts.router, prefix="/accounts", tags=["accounts"])
 app.include_router(proxy.router, prefix="", tags=["proxy"])
 app.include_router(orders.router, prefix="/orders", tags=["orders"])
+app.include_router(onboarding.router, prefix="/onboarding", tags=["onboarding"])
 
 

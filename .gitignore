@@ -1,0 +1,83 @@
+# Environment files
+mobile/extended_mobile/assets/env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+backend/.venv/
+backend/venv/
+backend/ENV/
+backend/env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+mobile/extended_mobile/.dart_tool/
+mobile/extended_mobile/.flutter-plugins
+mobile/extended_mobile/.flutter-plugins-dependencies
+mobile/extended_mobile/.packages
+mobile/extended_mobile/.pub-cache/
+mobile/extended_mobile/.pub/
+mobile/extended_mobile/build/
+
+# Android
+*.apk
+*.ap_
+*.aab
+mobile/extended_mobile/android/.gradle/
+mobile/extended_mobile/android/app/build/
+mobile/extended_mobile/android/.idea/
+mobile/extended_mobile/android/local.properties
+
+# iOS
+mobile/extended_mobile/ios/Pods/
+mobile/extended_mobile/ios/.symlinks/
+mobile/extended_mobile/ios/Flutter/Flutter.framework
+mobile/extended_mobile/ios/Flutter/Flutter.podspec
+mobile/extended_mobile/ios/ServiceDefinitions.json
+mobile/extended_mobile/ios/Runner.xcworkspace/
+mobile/extended_mobile/ios/.flutter-plugins-dependencies
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
