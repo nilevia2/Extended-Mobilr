@@ -13,6 +13,13 @@ from ..storage import STORE
 router = APIRouter()
 
 
+@router.get("/referral-code")
+def get_referral_code():
+    """Get the referral code to use for onboarding"""
+    cfg = get_endpoint_config()
+    return {"referral_code": cfg.referral_code}
+
+
 class OnboardingStartRequest(BaseModel):
     wallet_address: str = Field(..., description="L1 wallet address (0x...)")
     account_index: int = Field(..., ge=0, description="Subaccount index")
@@ -83,6 +90,7 @@ class OnboardingCompleteRequest(BaseModel):
     registration_signature: str = Field(..., description="0x... signature for AccountRegistration struct")
     registration_time: str = Field(..., description="ISO8601 time used in AccountRegistration message")
     registration_host: str = Field(..., description="Host used in AccountRegistration message (e.g. https://api.starknet.sepolia.extended.exchange)")
+    referral_code: str = Field(default="", description="Referral code from mobile app (fetched from backend)")
 
 
 class OnboardingCompleteResponse(BaseModel):
@@ -109,6 +117,8 @@ def onboarding_complete(payload: OnboardingCompleteRequest) -> OnboardingComplet
         cfg = get_endpoint_config()
         l2_msg = pedersen_hash(int(payload.wallet_address, 16), public_int)
         r, s = stark_sign(msg_hash=l2_msg, private_key=private_int)
+        # Use referral code from request (fetched from backend by mobile app), fallback to config if empty
+        referral_code = payload.referral_code if payload.referral_code else cfg.referral_code
         onboarding_payload = {
             "l1Signature": payload.registration_signature,
             "l2Key": pub_hex,
@@ -121,7 +131,7 @@ def onboarding_complete(payload: OnboardingCompleteRequest) -> OnboardingComplet
                 "action": "REGISTER",
                 "host": payload.registration_host,
             },
-            "referralCode": "ADMIN",
+            "referralCode": referral_code,
         }
         url = f"{cfg.onboarding_url}/auth/onboard"
         with httpx.Client(timeout=20.0) as client:

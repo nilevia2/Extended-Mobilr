@@ -1,6 +1,8 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'config.dart';
+import 'local_store.dart';
 
 class BackendClient {
   final Dio _dio = Dio(BaseOptions(
@@ -46,6 +48,27 @@ class BackendClient {
       'stark_public_key': starkPublicKey,
       'vault': vault,
     });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> getAccountInfo({
+    required String walletAddress,
+    required int accountIndex,
+  }) async {
+    // Get account info from Extended API directly (requires API key)
+    final apiKey = await LocalStore.loadApiKey(walletAddress: walletAddress, accountIndex: accountIndex);
+    if (apiKey == null || apiKey.isEmpty) {
+      throw Exception('API key required');
+    }
+    final extendedUrl = dotenv.env['EXTENDED_PUBLIC_BASE_URL']?.trim() ?? 'https://starknet.app.extended.exchange/api/v1';
+    final dio = Dio(BaseOptions(
+      baseUrl: extendedUrl,
+      headers: {
+        'X-Api-Key': apiKey,
+        'User-Agent': 'ExtendedMobile/1.0',
+      },
+    ));
+    final res = await dio.get('/user/account/info');
     return Map<String, dynamic>.from(res.data);
   }
 
@@ -122,12 +145,18 @@ class BackendClient {
     return Map<String, dynamic>.from(res.data);
   }
 
+  Future<Map<String, dynamic>> getReferralCode() async {
+    final res = await _dio.get('/onboarding/referral-code');
+    return Map<String, dynamic>.from(res.data);
+  }
+
   Future<Map<String, dynamic>> onboardingComplete({
     required String walletAddress,
     required String signature,
     required String registrationSignature,
     required String registrationTime,
     required String registrationHost,
+    String? referralCode,
     int accountIndex = 0,
   }) async {
     final res = await _dio.post('/onboarding/complete', data: {
@@ -137,6 +166,7 @@ class BackendClient {
       'registration_signature': registrationSignature,
       'registration_time': registrationTime,
       'registration_host': registrationHost,
+      if (referralCode != null && referralCode.isNotEmpty) 'referral_code': referralCode,
     });
     return Map<String, dynamic>.from(res.data);
   }

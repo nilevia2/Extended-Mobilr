@@ -13,6 +13,9 @@ Minimal FastAPI backend to support the Extended mobile app.
 - Config
   - Environment selection via `EXTENDED_ENV` (`testnet` default, or `mainnet`).
   - Endpoint defaults are in `app/config.py`.
+  - Referral code via `REFERRAL_CODE` environment variable (optional, defaults to empty).
+    - Create a `.env` file in the `backend/` directory with `REFERRAL_CODE=your_code` to set it.
+    - See `.env.example` for template.
 
 - Run locally
   - Install deps: `pip install -r backend/requirements.txt`

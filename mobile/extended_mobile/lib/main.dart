@@ -17,6 +17,7 @@ import 'core/extended_public_client.dart';
 import 'core/local_store.dart';
 import 'core/wallet_connect.dart';
 import 'core/backend_client.dart';
+import 'core/extended_client.dart';
 
 // Extended theme palette
 const _colorGreenPrimary = Color(0xFF00BC84);
@@ -97,13 +98,24 @@ class _ExtendedAppState extends State<ExtendedApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       debugPrint('[APP] App resumed from background - WalletConnect should handle response');
       // Give WalletConnect time to process any pending responses
-      Future.delayed(const Duration(milliseconds: 500), () {
-        debugPrint('[APP] Resumed delay complete');
+      // Use a safe delayed callback that checks if widget is still mounted
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        if (mounted) {
+          debugPrint('[APP] Resumed delay complete - widget still mounted');
+        } else {
+          debugPrint('[APP] Resumed delay complete - widget disposed');
+        }
+      }).catchError((e) {
+        debugPrint('[APP] Error in resumed delay: $e');
       });
     } else if (state == AppLifecycleState.paused) {
       debugPrint('[APP] App paused - going to background (likely opening wallet)');
     } else if (state == AppLifecycleState.inactive) {
       debugPrint('[APP] App inactive - transitioning');
+    } else if (state == AppLifecycleState.hidden) {
+      debugPrint('[APP] App hidden');
+    } else if (state == AppLifecycleState.detached) {
+      debugPrint('[APP] App detached');
     }
   }
 
@@ -507,12 +519,25 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   bool _loading = false;
   String? _lastWcUri;
   bool _onboarding = false;
-  bool _savingApiKey = false;
   String? _cachedApiKey;
+  String? _cachedWalletAddress; // For API key-only mode
   bool _autoIssuing = false;
 
   Future<void> _connectWallet() async {
     final svc = ref.read(walletServiceProvider);
+    
+    // Prevent double-click - if already connecting, return
+    if (svc.isConnecting) {
+      debugPrint('[CONNECT] Already connecting, ignoring duplicate click');
+      return;
+    }
+    
+    // If already connected, don't reconnect
+    if (svc.isConnected) {
+      debugPrint('[CONNECT] Already connected to ${svc.address}');
+      return;
+    }
+    
     final uri = await svc.connect();
     if (uri != null) {
       _lastWcUri = uri.toString();
@@ -530,11 +555,104 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         try {
           if (await canLaunchUrl(target)) {
             launched = await launchUrl(target, mode: LaunchMode.externalApplication);
-            if (launched) break;
+            if (launched) {
+              debugPrint('[CONNECT] Successfully opened wallet app');
+              break;
+            }
           }
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('[CONNECT] Failed to launch $target: $e');
+        }
       }
-      if (!launched && mounted) _showWalletConnectQr(_lastWcUri!);
+      if (!launched && mounted) {
+        debugPrint('[CONNECT] Could not auto-launch wallet, showing QR code');
+        _showWalletConnectQr(_lastWcUri!);
+      }
+      
+      // Listen for connection completion - check immediately and also after a delay
+      // Check immediately in case connection is already established
+      final connectedSvc = ref.read(walletServiceProvider);
+      if (connectedSvc.isConnected && connectedSvc.address != null) {
+        debugPrint('[CONNECT] Wallet already connected, checking auto-onboard');
+        _checkAndAutoOnboard(connectedSvc.address!);
+      } else {
+        // Also check after delay in case connection happens asynchronously
+        Future.delayed(const Duration(seconds: 3), () async {
+          if (!mounted) return;
+          final delayedSvc = ref.read(walletServiceProvider);
+          if (delayedSvc.isConnected && delayedSvc.address != null) {
+            debugPrint('[CONNECT] Wallet connected after delay, checking auto-onboard');
+            await _checkAndAutoOnboard(delayedSvc.address!);
+          } else {
+            debugPrint('[CONNECT] Wallet not connected after delay - user may need to approve in wallet app');
+          }
+        });
+      }
+    }
+  }
+  
+  Future<void> _checkAndAutoOnboard(String address) async {
+    // Skip if already onboarding or issuing
+    if (_onboarding || _autoIssuing) {
+      debugPrint('[AUTO-ONBOARD] Already onboarding or issuing, skipping (onboarding=$_onboarding, issuing=$_autoIssuing)');
+      return;
+    }
+    
+    // Normalize address (lowercase)
+    final normalizedAddress = address.toLowerCase();
+    debugPrint('[AUTO-ONBOARD] ==========================================');
+    debugPrint('[AUTO-ONBOARD] Checking for wallet: $normalizedAddress');
+    debugPrint('[AUTO-ONBOARD] Widget mounted: $mounted');
+    debugPrint('[AUTO-ONBOARD] ==========================================');
+    
+    // Check if API key exists - if not, auto-onboard
+    final existing = await LocalStore.loadApiKey(walletAddress: normalizedAddress, accountIndex: 0);
+    if (existing == null || existing.isEmpty) {
+      debugPrint('[AUTO-ONBOARD] No API key found for $normalizedAddress, starting auto-onboarding');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Setting up your account...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      // Start onboarding - this will request signatures
+      try {
+        await _startOnboarding();
+      } catch (e) {
+        debugPrint('[AUTO-ONBOARD] Onboarding failed: $e');
+        if (!mounted) return;
+        final errorMsg = e.toString();
+        final isConnectionError = errorMsg.contains('connection') || 
+                                  errorMsg.contains('timeout') || 
+                                  errorMsg.contains('Failed host lookup') ||
+                                  errorMsg.contains('Network is unreachable');
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              isConnectionError 
+                ? 'Cannot reach backend. Check your network/VPN connection.'
+                : 'Onboarding failed: ${errorMsg.length > 80 ? errorMsg.substring(0, 80) + "..." : errorMsg}',
+            ),
+            duration: const Duration(seconds: 5),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } else {
+      debugPrint('[AUTO-ONBOARD] API key found for $normalizedAddress, user already onboarded');
+      // Sync API key to backend in case it was lost
+      try {
+        final api = BackendClient();
+        await api.upsertAccount(walletAddress: normalizedAddress, accountIndex: 0, apiKey: existing);
+        debugPrint('[AUTO-ONBOARD] Synced API key to backend');
+        if (mounted) setState(() => _cachedApiKey = existing);
+      } catch (e) {
+        debugPrint('[AUTO-ONBOARD] Warning: Failed to sync API key: $e');
+        // Don't show error for sync failure - local key is primary
+      }
     }
   }
 
@@ -598,15 +716,35 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Future<void> _fetchBalances() async {
-    final svc = ref.read(walletServiceProvider);
-    final address = svc.address;
-    if (address == null) return;
     setState(() => _loading = true);
     try {
-      // Check for API key first - don't auto-issue here to avoid duplicate signatures
-      final apiKey = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
+      // Try to get wallet address from connected wallet first
+      final svc = ref.read(walletServiceProvider);
+      String? address = svc.address;
+      
+      // If no wallet connected, try to load from stored API key
+      if (address == null) {
+        debugPrint('[BALANCES] No wallet connected, checking for stored API key');
+        final stored = await LocalStore.loadApiKeyForAccount(0);
+        address = stored['walletAddress'];
+        if (address == null || stored['apiKey'] == null) {
+          debugPrint('[BALANCES] No API key found locally');
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('API key required. Please connect wallet and complete onboarding.'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+          return;
+        }
+        debugPrint('[BALANCES] Using stored API key for wallet $address');
+      }
+      
+      // Verify API key exists
+      final apiKey = await LocalStore.loadApiKey(walletAddress: address!, accountIndex: 0);
       if (apiKey == null || apiKey.isEmpty) {
-        debugPrint('[BALANCES] No API key found');
+        debugPrint('[BALANCES] No API key found for $address');
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -617,22 +755,79 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         return;
       }
       
-      final api = BackendClient();
-      debugPrint('[BALANCES] Fetching balances for $address');
-      final res = await api.getBalances(walletAddress: address, accountIndex: 0);
-      setState(() => _balances = res.toString());
+      // Use direct Extended API (faster, no backend dependency)
+      final extendedClient = ExtendedClient();
+      debugPrint('[BALANCES] Fetching balances directly from Extended API for $address');
+      debugPrint('[BALANCES] Using API key: ${apiKey.substring(0, 8)}...');
+      final res = await extendedClient.getBalances(apiKey);
+      
+      // Format balance response nicely
+      final data = res['data'] as Map<String, dynamic>?;
+      if (data != null) {
+        final balance = data['balance'] ?? data['accountBalance'] ?? '0';
+        final equity = data['equity'] ?? '0';
+        final availableBalance = data['availableBalance'] ?? data['availableBalanceForTrading'] ?? '0';
+        
+        final balanceStr = StringBuffer();
+        balanceStr.writeln('Balance: $balance');
+        balanceStr.writeln('Equity: $equity');
+        balanceStr.writeln('Available: $availableBalance');
+        
+        // Add account info if available (from fallback)
+        if (data['accountInfo'] != null) {
+          final accountInfo = data['accountInfo'] as Map<String, dynamic>;
+          balanceStr.writeln('\nAccount ID: ${accountInfo['accountId'] ?? 'N/A'}');
+          balanceStr.writeln('Status: ${accountInfo['status'] ?? 'N/A'}');
+        }
+        
+        setState(() => _balances = balanceStr.toString());
+      } else {
+        setState(() => _balances = 'Balance: 0\nEquity: 0\nAvailable: 0');
+      }
       debugPrint('[BALANCES] Success');
     } catch (e) {
       debugPrint('[BALANCES] Error: $e');
       if (!mounted) return;
       final msg = e.toString();
-      if (msg.contains('status code of 401') || msg.contains('401')) {
+      final is451Error = msg.contains('451') || msg.contains('Unavailable For Legal Reasons');
+      
+      // Handle 451 error (geographic/legal restriction)
+      if (is451Error) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Authentication failed. Please complete onboarding to get an API key.'),
-            duration: Duration(seconds: 4),
+            content: Text('Extended Exchange is not available in your region. Use VPN instead.'),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.orange,
           ),
         );
+        return;
+      }
+      
+      // If API key fails (401 or any error), show error and require reconnection
+      if (msg.contains('status code of 401') || msg.contains('401') || msg.contains('Authentication')) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error, try to login again'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        // Disconnect wallet to force reconnection
+        final svc = ref.read(walletServiceProvider);
+        if (svc.isConnected) {
+          await svc.disconnect();
+        }
+        // Clear cached API key as it's invalid
+        if (_cachedWalletAddress != null) {
+          await LocalStore.saveApiKey(
+            walletAddress: _cachedWalletAddress!,
+            accountIndex: 0,
+            apiKey: '', // Clear invalid key
+          );
+          setState(() {
+            _cachedApiKey = null;
+            _cachedWalletAddress = null;
+          });
+        }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -649,14 +844,99 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   @override
   void initState() {
     super.initState();
-    // Ensure WC core is initialized
-    Future.microtask(() => ref.read(walletServiceProvider).init());
+    // Ensure WC core is initialized and check for existing connection
+    Future.microtask(() async {
+      await ref.read(walletServiceProvider).init();
+      // Fetch referral code from backend on first app start (if not already stored)
+      final storedRefCode = await LocalStore.loadReferralCode();
+      if (storedRefCode == null || storedRefCode.isEmpty) {
+        try {
+          final api = BackendClient();
+          final refResponse = await api.getReferralCode();
+          final refCode = refResponse['referral_code'] as String? ?? '';
+          if (refCode.isNotEmpty) {
+            await LocalStore.saveReferralCode(refCode);
+            debugPrint('[INIT] Fetched and saved referral code: $refCode');
+          }
+        } catch (e) {
+          debugPrint('[INIT] Failed to fetch referral code: $e');
+        }
+      }
+      
+      // Auto-load balances if API key exists (even without wallet connection)
+      final stored = await LocalStore.loadApiKeyForAccount(0);
+      if (stored['walletAddress'] != null && stored['apiKey'] != null) {
+        debugPrint('[INIT] API key found, auto-loading balances');
+        try {
+          await _fetchBalances();
+        } catch (e) {
+          debugPrint('[INIT] Failed to auto-load balances: $e');
+          // If balance fetch fails, show error and require reconnection
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Error, try to login again'),
+                duration: Duration(seconds: 3),
+              ),
+            );
+            // Disconnect wallet if connected to force reconnection
+            final svc = ref.read(walletServiceProvider);
+            if (svc.isConnected) {
+              await svc.disconnect();
+            }
+          }
+        }
+      }
+      
+      // Check if wallet is already connected (e.g., app restarted with existing session)
+      final svc = ref.read(walletServiceProvider);
+      if (svc.isConnected && svc.address != null) {
+        debugPrint('[INIT] Wallet already connected on app start, checking auto-onboard');
+        await _checkAndAutoOnboard(svc.address!);
+      }
+      
+      // Also listen for future connection changes
+      ref.listenManual(walletServiceProvider, (previous, next) {
+        // Only trigger if wallet just connected (wasn't connected before, now is)
+        final wasConnected = previous?.isConnected ?? false;
+        final isNowConnected = next.isConnected && next.address != null;
+        if (!wasConnected && isNowConnected) {
+          debugPrint('[INIT] Wallet connected via listener, checking auto-onboard');
+          // Use a small delay to ensure widget is mounted
+          Future.microtask(() {
+            if (mounted) {
+              _checkAndAutoOnboard(next.address!);
+            }
+          });
+        }
+      });
+    });
     _loadCachedApiKeyIfAny();
   }
 
+  String? _lastConnectedAddress;
+  
   @override
   Widget build(BuildContext context) {
     final svc = ref.watch(walletServiceProvider);
+    
+    // Check for connection changes in build method (more reliable than listener)
+    if (svc.isConnected && svc.address != null) {
+      final currentAddress = svc.address!.toLowerCase();
+      if (_lastConnectedAddress != currentAddress) {
+        _lastConnectedAddress = currentAddress;
+        debugPrint('[BUILD] Wallet connected: $currentAddress, triggering auto-onboard check');
+        // Trigger auto-onboard check after build completes
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _checkAndAutoOnboard(currentAddress);
+          }
+        });
+      }
+    } else if (!svc.isConnected) {
+      _lastConnectedAddress = null;
+    }
+    
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -665,22 +945,29 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           Row(
             children: [
               Expanded(
-                child: Text(
-                  svc.isConnected ? 'Wallet: ${svc.address}' : 'No wallet connected',
-                  style: const TextStyle(color: _colorTextMain),
-                  overflow: TextOverflow.ellipsis,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      svc.isConnected 
+                          ? 'Wallet: ${svc.address}' 
+                          : (_cachedWalletAddress != null 
+                              ? 'API Key Mode: $_cachedWalletAddress' 
+                              : 'No wallet connected'),
+                      style: const TextStyle(color: _colorTextMain),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (!svc.isConnected && _cachedWalletAddress != null)
+                      const Text(
+                        'Read-only mode (API key stored). Connect wallet to place orders.',
+                        style: TextStyle(color: _colorTextSecondary, fontSize: 12),
+                      ),
+                  ],
                 ),
               ),
               const SizedBox(width: 8),
               if (svc.isConnected) ...[
                 OutlinedButton(onPressed: _disconnect, child: const Text('Disconnect')),
-                const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: _savingApiKey ? null : () => _promptAndSaveApiKey(),
-                  child: _savingApiKey
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('Set API Key'),
-                ),
               ] else ...[
                 FilledButton(
                   onPressed: svc.isConnecting ? null : _connectWallet,
@@ -694,17 +981,23 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
             ],
           ),
           const SizedBox(height: 16),
-          if (svc.isConnected) ...[
-            FilledButton.tonal(
-              onPressed: _onboarding ? null : _startOnboarding,
-              child: _onboarding
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Onboard (Sign & Attach)'),
+          if (svc.isConnected && _onboarding) ...[
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Column(
+                  children: [
+                    SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
+                    SizedBox(height: 8),
+                    Text('Setting up your account...', style: TextStyle(color: _colorTextSecondary)),
+                  ],
+                ),
+              ),
             ),
             const SizedBox(height: 16),
           ],
           FilledButton(
-            onPressed: svc.isConnected && !_loading ? _fetchBalances : null,
+            onPressed: !_loading ? _fetchBalances : null,
             child: _loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Fetch Balances'),
           ),
           const SizedBox(height: 16),
@@ -741,6 +1034,26 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     try {
       debugPrint('[ONBOARD] Starting onboarding for $address');
       final api = BackendClient();
+      
+      // Fetch referral code from backend if not already stored locally
+      String? referralCode = await LocalStore.loadReferralCode();
+      if (referralCode == null || referralCode.isEmpty) {
+        debugPrint('[ONBOARD] Fetching referral code from backend');
+        try {
+          final refResponse = await api.getReferralCode();
+          referralCode = refResponse['referral_code'] as String? ?? '';
+          if (referralCode != null && referralCode.isNotEmpty) {
+            await LocalStore.saveReferralCode(referralCode);
+            debugPrint('[ONBOARD] Saved referral code locally: $referralCode');
+          }
+        } catch (e) {
+          debugPrint('[ONBOARD] Failed to fetch referral code: $e');
+          referralCode = ''; // Continue without referral code
+        }
+      } else {
+        debugPrint('[ONBOARD] Using stored referral code: $referralCode');
+      }
+      
       debugPrint('[ONBOARD] Calling /onboarding/start');
       final start = await api.onboardingStart(walletAddress: address, accountIndex: 0);
       debugPrint('[ONBOARD] Got start response: ${start.keys}');
@@ -790,25 +1103,63 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         debugPrint('[ONBOARD] Got second signature successfully');
       } catch (e) {
         debugPrint('[ONBOARD] Second signature error: $e');
-        // If app was in background, wait a bit
+        // If app was in background, wait a bit and check if still mounted
         await Future.delayed(const Duration(seconds: 2));
+        if (!mounted) {
+          debugPrint('[ONBOARD] Widget disposed after error, aborting');
+          return;
+        }
         rethrow;
       }
       
       if (sigCreation == null || sigRegistration == null) {
         throw Exception('Failed to get both signatures');
       }
+      // Check if still mounted before continuing
+      if (!mounted) {
+        debugPrint('[ONBOARD] Widget disposed, aborting onboarding');
+        return;
+      }
+      
       debugPrint('[ONBOARD] Got both signatures, calling /onboarding/complete');
-      await api.onboardingComplete(
+      final onboardResponse = await api.onboardingComplete(
         walletAddress: address,
         signature: sigCreation,
         registrationSignature: sigRegistration,
         registrationTime: (regTyped['message'] as Map)['time'] as String,
         registrationHost: (regTyped['message'] as Map)['host'] as String,
+        referralCode: referralCode,
         accountIndex: 0,
       );
       debugPrint('[ONBOARD] Onboarding complete');
-      if (!mounted) return;
+      
+      // Check again before updating state
+      if (!mounted) {
+        debugPrint('[ONBOARD] Widget disposed after onboarding complete, aborting');
+        return;
+      }
+      
+      // Store Stark keys locally for client-side order signing
+      final starkPrivateKey = onboardResponse['stark_private_key'] as String?;
+      final starkPublicKey = onboardResponse['stark_public_key'] as String?;
+      if (starkPrivateKey != null && starkPublicKey != null) {
+        // Store Stark keys temporarily (vault will be set after API key issuance)
+        // We'll update with vault ID once we fetch account info
+        debugPrint('[ONBOARD] Storing Stark keys locally (vault will be fetched after API key issuance)');
+        // Store keys with vault=0 temporarily, will update after API key issuance
+        try {
+          await LocalStore.saveStarkKeys(
+            walletAddress: address,
+            accountIndex: 0,
+            starkPrivateKey: starkPrivateKey,
+            starkPublicKey: starkPublicKey,
+            vault: 0, // Temporary, will be updated after API key issuance
+          );
+        } catch (e) {
+          debugPrint('[ONBOARD] Error saving Stark keys: $e');
+          // Continue anyway
+        }
+      }
       
       // Show success message first
       if (mounted) {
@@ -821,25 +1172,24 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         await _ensureApiKeyPresent(address);
         debugPrint('[ONBOARD] API key issued successfully');
         
-        // Now fetch balances
+        // Auto-load balances after API key is ready
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('API key ready! Fetching balances...')));
           try {
             await _fetchBalances();
             if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete!')));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete! Balances loaded.')));
             }
           } catch (e) {
-            debugPrint('[ONBOARD] Failed to fetch balances: $e');
+            debugPrint('[ONBOARD] Failed to auto-load balances: $e');
             if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete! Use "Fetch Balances" to load your data.')));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete! Balances will load automatically.')));
             }
           }
         }
       } catch (e) {
         debugPrint('[ONBOARD] API key issuance failed: $e');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete, but API key issuance failed. You can retry later.')));
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete, but API key issuance failed. Please reconnect wallet.')));
         }
       }
     } catch (e, stack) {
@@ -916,59 +1266,31 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     }
   }
 
-  Future<void> _promptAndSaveApiKey() async {
-    final svc = ref.read(walletServiceProvider);
-    final address = svc.address;
-    if (address == null) return;
-    final controller = TextEditingController(text: _cachedApiKey ?? '');
-    final result = await showDialog<String?>(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: _colorBgElevated,
-          title: const Text('Enter Extended API Key', style: TextStyle(color: _colorTextMain)),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(
-              hintText: 'X-Api-Key from Extended',
-              filled: true,
-              fillColor: _colorBlack,
-              border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8)), borderSide: BorderSide.none),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(null), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.of(ctx).pop(controller.text.trim()), child: const Text('Save')),
-          ],
-        );
-      },
-    );
-    if (result == null) return;
-    final apiKey = result.trim();
-    if (apiKey.isEmpty) return;
-    setState(() => _savingApiKey = true);
-    try {
-      final api = BackendClient();
-      await api.upsertAccount(walletAddress: address, accountIndex: 0, apiKey: apiKey);
-      await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: apiKey);
-      setState(() => _cachedApiKey = apiKey);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('API key saved.')));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to save API key: $e')));
-    } finally {
-      if (mounted) setState(() => _savingApiKey = false);
-    }
-  }
 
   Future<void> _loadCachedApiKeyIfAny() async {
+    // Try connected wallet first
     final svc = ref.read(walletServiceProvider);
     final address = svc.address;
-    if (address == null) return;
-    final existing = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
-    if (mounted) setState(() => _cachedApiKey = existing);
+    if (address != null) {
+      final existing = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
+      if (mounted) {
+        setState(() {
+          _cachedApiKey = existing;
+          _cachedWalletAddress = address;
+        });
+      }
+      return;
+    }
+    
+    // If no wallet connected, try to load from stored API key
+    final stored = await LocalStore.loadApiKeyForAccount(0);
+    if (stored['walletAddress'] != null && stored['apiKey'] != null && mounted) {
+      setState(() {
+        _cachedApiKey = stored['apiKey'];
+        _cachedWalletAddress = stored['walletAddress'];
+      });
+      debugPrint('[LOAD] Loaded API key for wallet ${stored['walletAddress']} (no wallet connected)');
+    }
   }
 
   Future<void> _autoIssueApiKey() async {
@@ -981,7 +1303,6 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     }
     setState(() {
       _autoIssuing = true;
-      _savingApiKey = true;
     });
     try {
       debugPrint('[APIKEY] Preparing API key issuance');
@@ -995,61 +1316,144 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         throw Exception('Invalid prepare response');
       }
       
-      // Open wallet BEFORE requesting signatures
-      debugPrint('[APIKEY] Opening wallet for API key signatures');
-      await _openAnyWalletApp();
-      await Future.delayed(const Duration(milliseconds: 1500));
-      
-      // Sign both messages sequentially
+      // Sign both messages sequentially - personalSign will auto-open wallet
       debugPrint('[APIKEY] Requesting first signature (accounts)');
       final sigAccounts = await svc
-          .personalSign(address: address, message: accountsMessage)
+          .personalSign(address: address, message: accountsMessage, autoOpenWallet: true)
           .timeout(const Duration(seconds: 90), onTimeout: () {
         throw TimeoutException('Wallet did not respond to first signature. Please check your wallet app.');
       });
       
-      debugPrint('[APIKEY] Got first signature, opening wallet for second');
-      await _openAnyWalletApp();
-      await Future.delayed(const Duration(milliseconds: 1500));
+      debugPrint('[APIKEY] Got first signature, requesting second signature (create key)');
+      // Small delay between signatures
+      await Future.delayed(const Duration(milliseconds: 500));
       
       debugPrint('[APIKEY] Requesting second signature (create key)');
       final sigCreate = await svc
-          .personalSign(address: address, message: createMessage)
+          .personalSign(address: address, message: createMessage, autoOpenWallet: true)
           .timeout(const Duration(seconds: 90), onTimeout: () {
         throw TimeoutException('Wallet did not respond to second signature. Please check your wallet app.');
       });
       
+      // Check if still mounted before continuing
+      if (!mounted) {
+        debugPrint('[APIKEY] Widget disposed, aborting API key issuance');
+        return;
+      }
+      
       debugPrint('[APIKEY] Issuing API key with signatures');
-      final issued = await api.apiKeyIssue(
-        walletAddress: address,
-        accountIndex: 0,
-        accountsAuthTime: accountsTime,
-        accountsSignature: sigAccounts,
-        createAuthTime: createTime,
-        createSignature: sigCreate,
-      );
+      Map<String, dynamic> issued;
+      try {
+        issued = await api.apiKeyIssue(
+          walletAddress: address,
+          accountIndex: 0,
+          accountsAuthTime: accountsTime,
+          accountsSignature: sigAccounts,
+          createAuthTime: createTime,
+          createSignature: sigCreate,
+        ).timeout(const Duration(seconds: 30), onTimeout: () {
+          throw TimeoutException('API key issuance timed out. Check your network connection.');
+        });
+      } catch (e) {
+        debugPrint('[APIKEY] Error during API key issuance: $e');
+        if (e.toString().contains('network') || e.toString().contains('timeout') || e.toString().contains('connection')) {
+          throw Exception('Network error during API key generation. Please check your connection and try again.');
+        }
+        rethrow;
+      }
       final key = (issued['api_key'] ?? '') as String;
       if (key.isEmpty) throw Exception('No API key returned');
       
-      debugPrint('[APIKEY] Saving API key locally and to backend');
-      await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
-      // Also save to backend database so it persists
-      try {
-        await api.upsertAccount(walletAddress: address, accountIndex: 0, apiKey: key);
-        debugPrint('[APIKEY] API key saved to backend database');
-      } catch (e) {
-        debugPrint('[APIKEY] Warning: Failed to save API key to backend: $e');
-        // Continue anyway - local storage is primary
+      // Check again before updating state
+      if (!mounted) {
+        debugPrint('[APIKEY] Widget disposed after API key issued, saving but not updating UI');
+        // Still save the key even if widget is disposed
+        await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
+        return;
       }
-      if (mounted) setState(() => _cachedApiKey = key);
       
-      // Set referral/builder code to ADMIN (non-blocking)
-      try {
-        await api.setReferralCode(walletAddress: address, accountIndex: 0, code: 'ADMIN');
-        debugPrint('[APIKEY] Referral code set to ADMIN');
-      } catch (e) {
-        debugPrint('[APIKEY] Failed to set referral code: $e');
+      debugPrint('[APIKEY] Saving API key locally: ${key.substring(0, 8)}...');
+      await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
+      setState(() => _cachedApiKey = key);
+      
+      // Verify API key was saved correctly
+      final verifyKey = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
+      if (verifyKey != key) {
+        debugPrint('[APIKEY] WARNING: Saved key mismatch! Saved: $verifyKey, Expected: $key');
+      } else {
+        debugPrint('[APIKEY] Verified: API key saved correctly');
       }
+      
+      // Fetch account info directly from Extended API to get vault ID, then store Stark keys
+      // Only if widget is still mounted
+      if (!mounted) {
+        debugPrint('[APIKEY] Widget disposed, skipping account info fetch');
+        return;
+      }
+      
+      // Retry logic: API key may need a moment to activate on Extended's side
+      Map<String, dynamic>? accountInfo;
+      int retries = 3;
+      for (int i = 0; i < retries; i++) {
+        if (i > 0) {
+          debugPrint('[APIKEY] Retry $i/$retries: Waiting before retry...');
+          await Future.delayed(Duration(milliseconds: 1000 * i)); // Exponential backoff
+        } else {
+          await Future.delayed(const Duration(milliseconds: 500)); // Initial delay
+        }
+        
+        try {
+          debugPrint('[APIKEY] Fetching account info directly from Extended API to get vault ID (attempt ${i + 1}/$retries)');
+          debugPrint('[APIKEY] Using API key: ${key.substring(0, 8)}...');
+          final extendedClient = ExtendedClient();
+          accountInfo = await extendedClient.getAccountInfo(key);
+          debugPrint('[APIKEY] Account info fetched successfully');
+          break; // Success, exit retry loop
+        } catch (e) {
+          debugPrint('[APIKEY] Attempt ${i + 1} failed: $e');
+          if (i == retries - 1) {
+            // Last retry failed, log warning but continue (vault fetch is optional)
+            debugPrint('[APIKEY] Warning: Failed to fetch account info after $retries attempts. Vault ID will not be stored.');
+            accountInfo = null;
+          }
+        }
+      }
+      
+      if (accountInfo != null) {
+        
+        // Check again after async operation
+        if (!mounted) {
+          debugPrint('[APIKEY] Widget disposed after account info fetch');
+          return;
+        }
+        
+        final accountData = accountInfo['data'] as Map<String, dynamic>?;
+        final vault = accountData?['l2Vault'] as int?;
+        
+        // Get Stark keys from onboarding response (stored earlier)
+        final starkKeys = await LocalStore.loadStarkKeys(walletAddress: address, accountIndex: 0);
+        if (starkKeys == null) {
+          debugPrint('[APIKEY] Stark keys not found in local storage');
+        } else if (vault != null) {
+          // Update vault if we have it
+          try {
+            await LocalStore.saveStarkKeys(
+              walletAddress: address,
+              accountIndex: 0,
+              starkPrivateKey: starkKeys['starkPrivateKey'] as String,
+              starkPublicKey: starkKeys['starkPublicKey'] as String,
+              vault: vault,
+            );
+            debugPrint('[APIKEY] Stark keys and vault stored locally (vault: $vault)');
+          } catch (e) {
+            debugPrint('[APIKEY] Error saving Stark keys with vault: $e');
+          }
+        } else {
+          debugPrint('[APIKEY] Vault ID not found in account info');
+        }
+      }
+      
+      // Referral code is set during onboarding, no need to set it again
       
       debugPrint('[APIKEY] API key issued and saved successfully');
     } catch (e) {
@@ -1062,11 +1466,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       if (mounted) {
         setState(() {
           _autoIssuing = false;
-          _savingApiKey = false;
         });
       } else {
         _autoIssuing = false;
-        _savingApiKey = false;
       }
     }
   }
