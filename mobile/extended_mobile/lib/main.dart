@@ -5,6 +5,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'dart:io';
 import 'dart:async';
@@ -12,6 +13,7 @@ import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:http/http.dart' as http;
 
 import 'core/extended_public_client.dart';
 import 'core/local_store.dart';
@@ -154,28 +156,82 @@ class _ExtendedAppState extends State<ExtendedApp> with WidgetsBindingObserver {
   }
 }
 
-class MainScaffold extends StatefulWidget {
+// Global key for portfolio body to access logout from app bar
+final GlobalKey<_PortfolioBodyState> _portfolioBodyKey = GlobalKey<_PortfolioBodyState>();
+
+class MainScaffold extends ConsumerStatefulWidget {
   const MainScaffold({super.key});
 
   @override
-  State<MainScaffold> createState() => _MainScaffoldState();
+  ConsumerState<MainScaffold> createState() => _MainScaffoldState();
 }
 
-class _MainScaffoldState extends State<MainScaffold> {
+class _MainScaffoldState extends ConsumerState<MainScaffold> {
   int _index = 0;
 
   @override
   Widget build(BuildContext context) {
     final pages = <Widget>[
       const HomePage(),
-      const PortfolioPage(),
+      _PortfolioBody(key: _portfolioBodyKey),
       const TradePage(),
     ];
 
     final titles = <String>['Home', 'Portfolio', 'Trade'];
+    
+    // Get wallet address and API key state for app bar
+    final portfolioState = ref.watch(_portfolioStateProvider);
+    final displayAddress = portfolioState['walletAddress'] != null && portfolioState['walletAddress'].length > 8
+        ? '${portfolioState['walletAddress'].substring(0, 4)}...${portfolioState['walletAddress'].substring(portfolioState['walletAddress'].length - 4)}'
+        : portfolioState['walletAddress'] ?? '';
+    final hasApiKey = portfolioState['hasApiKey'] == true;
 
     return Scaffold(
-      appBar: AppBar(title: Text(titles[_index])),
+      appBar: AppBar(
+        title: Text(titles[_index]),
+        actions: [
+          // Wallet address (if available)
+          if (displayAddress.isNotEmpty) ...[
+            Row(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: _colorTextSecondary,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  displayAddress,
+                  style: const TextStyle(
+                    color: _colorTextSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(width: 16),
+              ],
+            ),
+          ],
+          // Menu button with logout/login
+          _AppBarMenu(
+            hasApiKey: hasApiKey,
+            onLogout: () {
+              // Trigger logout in portfolio page
+              if (_portfolioBodyKey.currentState != null) {
+                _portfolioBodyKey.currentState!.logout();
+              }
+            },
+            onLogin: () {
+              // Trigger login (wallet connect) in portfolio page
+              if (_portfolioBodyKey.currentState != null) {
+                _portfolioBodyKey.currentState!.connectWallet();
+              }
+            },
+          ),
+        ],
+      ),
       body: pages[_index],
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
@@ -186,6 +242,65 @@ class _MainScaffoldState extends State<MainScaffold> {
           NavigationDestination(icon: Icon(Icons.show_chart_outlined), selectedIcon: Icon(Icons.show_chart), label: 'Trade'),
         ],
       ),
+    );
+  }
+}
+
+// Provider to share portfolio state with app bar
+final _portfolioStateProvider = StateNotifierProvider<_PortfolioStateNotifier, Map<String, dynamic>>((ref) {
+  return _PortfolioStateNotifier();
+});
+
+class _PortfolioStateNotifier extends StateNotifier<Map<String, dynamic>> {
+  _PortfolioStateNotifier() : super({'walletAddress': null, 'hasApiKey': false});
+  
+  void updateState(String? walletAddress, bool hasApiKey) {
+    state = {
+      'walletAddress': walletAddress,
+      'hasApiKey': hasApiKey,
+    };
+  }
+}
+
+// App bar menu component
+class _AppBarMenu extends ConsumerWidget {
+  final bool hasApiKey;
+  final VoidCallback? onLogout;
+  final VoidCallback? onLogin;
+  
+  const _AppBarMenu({
+    required this.hasApiKey,
+    this.onLogout,
+    this.onLogin,
+  });
+  
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.menu, color: _colorTextMain, size: 24),
+      color: _colorBgElevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+      ),
+      onSelected: (value) async {
+        if (value == 'logout' && onLogout != null) {
+          onLogout!();
+        } else if (value == 'login' && onLogin != null) {
+          onLogin!();
+        }
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem(
+          value: hasApiKey ? 'logout' : 'login',
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              hasApiKey ? 'Logout' : 'Login',
+              style: const TextStyle(color: _colorTextMain, fontSize: 14),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -206,8 +321,36 @@ class _MarketsHome extends ConsumerStatefulWidget {
   ConsumerState<_MarketsHome> createState() => _MarketsHomeState();
 }
 
-final _marketsProvider = FutureProvider<List<MarketRow>>((ref) async {
+final _marketsProvider = FutureProvider.autoDispose<List<MarketRow>>((ref) async {
+  // Keep the cache alive even when no longer actively watched
+  ref.keepAlive();
+  
   final client = ExtendedPublicClient();
+  
+  // Try to load cached markets first
+  try {
+    final cached = await client.getCachedMarkets();
+    if (cached != null && cached.isNotEmpty) {
+      debugPrint('[MARKETS] Loaded ${cached.length} markets from cache');
+      
+      // Refresh in background without blocking UI
+      Future.microtask(() async {
+        try {
+          final fresh = await client.getMarkets(silent: true);
+          debugPrint('[MARKETS] Refreshed ${fresh.length} markets in background');
+        } catch (e) {
+          debugPrint('[MARKETS] Background refresh failed: $e');
+        }
+      });
+      
+      return cached;
+    }
+  } catch (e) {
+    debugPrint('[MARKETS] Failed to load cached markets: $e');
+  }
+  
+  // If no cache, fetch fresh data
+  debugPrint('[MARKETS] No cache found, fetching fresh data');
   return client.getMarkets();
 });
 
@@ -498,17 +641,8 @@ class _MarketsList extends StatelessWidget {
   }
 }
 
-class PortfolioPage extends StatelessWidget {
-  const PortfolioPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return const _PortfolioBody();
-  }
-}
-
 class _PortfolioBody extends ConsumerStatefulWidget {
-  const _PortfolioBody();
+  const _PortfolioBody({super.key});
 
   @override
   ConsumerState<_PortfolioBody> createState() => _PortfolioBodyState();
@@ -522,8 +656,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   String? _cachedApiKey;
   String? _cachedWalletAddress; // For API key-only mode
   bool _autoIssuing = false;
+  bool _checkingState = true; // To prevent flickering while loading cached data
+  List<Map<String, dynamic>> _positions = [];
+  bool _loadingPositions = false;
+  int _selectedTabIndex = 0; // 0: Position, 1: Orders, 2: Realize
 
   Future<void> _connectWallet() async {
+    debugPrint('[CONNECT] Starting wallet connection...');
     final svc = ref.read(walletServiceProvider);
     
     // Prevent double-click - if already connecting, return
@@ -538,7 +677,24 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       return;
     }
     
-    final uri = await svc.connect();
+    Uri? uri;
+    try {
+      debugPrint('[CONNECT] Calling svc.connect()...');
+      uri = await svc.connect();
+      debugPrint('[CONNECT] svc.connect() returned: ${uri != null ? uri.toString() : 'null'}');
+    } catch (e) {
+      debugPrint('[CONNECT] Error during svc.connect(): $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to connect: $e'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
+    
     if (uri != null) {
       _lastWcUri = uri.toString();
       bool launched = false;
@@ -588,6 +744,17 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           }
         });
       }
+    } else {
+      // URI is null - connection failed
+      debugPrint('[CONNECT] Connection failed - URI is null');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to initialize wallet connection. Please try again.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
   
@@ -605,10 +772,20 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     debugPrint('[AUTO-ONBOARD] Widget mounted: $mounted');
     debugPrint('[AUTO-ONBOARD] ==========================================');
     
+    // Update cached wallet address
+    if (mounted) {
+      setState(() {
+        _cachedWalletAddress = normalizedAddress;
+      });
+    }
+    
     // Check if API key exists - if not, auto-onboard
     final existing = await LocalStore.loadApiKey(walletAddress: normalizedAddress, accountIndex: 0);
     if (existing == null || existing.isEmpty) {
       debugPrint('[AUTO-ONBOARD] No API key found for $normalizedAddress, starting auto-onboarding');
+      // Update portfolio state provider
+      ref.read(_portfolioStateProvider.notifier).updateState(normalizedAddress, false);
+      
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -627,7 +804,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         final isConnectionError = errorMsg.contains('connection') || 
                                   errorMsg.contains('timeout') || 
                                   errorMsg.contains('Failed host lookup') ||
-                                  errorMsg.contains('Network is unreachable');
+                                  errorMsg.contains('Network is unreachable') ||
+                                  errorMsg.contains('Connection refused');
         
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -643,12 +821,15 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       }
     } else {
       debugPrint('[AUTO-ONBOARD] API key found for $normalizedAddress, user already onboarded');
+      // Update cached API key and portfolio state provider
+      if (mounted) setState(() => _cachedApiKey = existing);
+      ref.read(_portfolioStateProvider.notifier).updateState(normalizedAddress, true);
+      
       // Sync API key to backend in case it was lost
       try {
         final api = BackendClient();
         await api.upsertAccount(walletAddress: normalizedAddress, accountIndex: 0, apiKey: existing);
         debugPrint('[AUTO-ONBOARD] Synced API key to backend');
-        if (mounted) setState(() => _cachedApiKey = existing);
       } catch (e) {
         debugPrint('[AUTO-ONBOARD] Warning: Failed to sync API key: $e');
         // Don't show error for sync failure - local key is primary
@@ -713,10 +894,90 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     setState(() {
       _balances = '';
     });
+    // Update portfolio state provider
+    ref.read(_portfolioStateProvider.notifier).updateState(null, false);
   }
 
-  Future<void> _fetchBalances() async {
+  Future<void> _logout() async {
+    debugPrint('[LOGOUT] Starting logout...');
+    
+    // Disconnect wallet
+    final svc = ref.read(walletServiceProvider);
+    if (svc.isConnected) {
+      debugPrint('[LOGOUT] Disconnecting wallet...');
+      await svc.disconnect();
+      debugPrint('[LOGOUT] Wallet disconnected');
+    }
+    
+    // Clear API key and Stark keys from local storage
+    if (_cachedWalletAddress != null) {
+      debugPrint('[LOGOUT] Clearing local storage for ${_cachedWalletAddress}');
+      await LocalStore.saveApiKey(
+        walletAddress: _cachedWalletAddress!,
+        accountIndex: 0,
+        apiKey: '', // Clear API key
+      );
+      
+      // Clear Stark keys
+      final secureStorage = FlutterSecureStorage();
+      final address = _cachedWalletAddress!.toLowerCase();
+      final privKey = 'stark_private_key_for_${address}_0';
+      final pubKey = 'stark_public_key_for_${address}_0';
+      await secureStorage.delete(key: privKey);
+      await secureStorage.delete(key: pubKey);
+      
+      final prefs = await SharedPreferences.getInstance();
+      final vaultKey = 'vault_for_${address}_0';
+      await prefs.remove(vaultKey);
+    }
+    
+    // Clear all state including connection-related state
+    if (mounted) {
+      setState(() {
+        _cachedApiKey = null;
+        _cachedWalletAddress = null;
+        _balances = '';
+        _positions = [];
+        _selectedTabIndex = 0;
+        _checkingState = false;
+        _onboarding = false;
+        _autoIssuing = false;
+        _loading = false;
+        _loadingPositions = false;
+        _lastWcUri = null;
+      });
+    }
+    
+    // Reset last connected address
+    _lastConnectedAddress = null;
+    
+    // Update portfolio state provider
+    ref.read(_portfolioStateProvider.notifier).updateState(null, false);
+    
+    debugPrint('[LOGOUT] Logout complete');
+  }
+
+  // Public wrapper methods for app bar menu
+  Future<void> logout() async {
+    await _logout();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Logged out successfully'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+  
+  void connectWallet() {
+    _connectWallet();
+  }
+
+  Future<void> _fetchBalances({bool silent = false}) async {
+    if (!silent) {
     setState(() => _loading = true);
+    }
     try {
       // Try to get wallet address from connected wallet first
       final svc = ref.read(walletServiceProvider);
@@ -729,7 +990,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         address = stored['walletAddress'];
         if (address == null || stored['apiKey'] == null) {
           debugPrint('[BALANCES] No API key found locally');
-          if (!mounted) return;
+          if (!mounted || silent) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('API key required. Please connect wallet and complete onboarding.'),
@@ -745,7 +1006,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       final apiKey = await LocalStore.loadApiKey(walletAddress: address!, accountIndex: 0);
       if (apiKey == null || apiKey.isEmpty) {
         debugPrint('[BALANCES] No API key found for $address');
-        if (!mounted) return;
+        if (!mounted || silent) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('API key required. Please complete onboarding first.'),
@@ -787,7 +1048,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       debugPrint('[BALANCES] Success');
     } catch (e) {
       debugPrint('[BALANCES] Error: $e');
-      if (!mounted) return;
+      if (!mounted || silent) return;
       final msg = e.toString();
       final is451Error = msg.contains('451') || msg.contains('Unavailable For Legal Reasons');
       
@@ -837,8 +1098,322 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         );
       }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && !silent) {
+        setState(() => _loading = false);
+      }
     }
+  }
+
+  Future<void> _fetchPositions({bool silent = false}) async {
+    if (!silent) {
+      setState(() => _loadingPositions = true);
+    }
+    try {
+      // Get API key
+      final stored = await LocalStore.loadApiKeyForAccount(0);
+      final apiKey = stored['apiKey'] as String?;
+      
+      if (apiKey == null || apiKey.isEmpty) {
+        debugPrint('[POSITIONS] No API key found');
+        if (!mounted || silent) return;
+        setState(() => _positions = []);
+        return;
+      }
+      
+      // Fetch positions from Extended API
+      final extendedClient = ExtendedClient();
+      debugPrint('[POSITIONS] Fetching positions from Extended API');
+      final res = await extendedClient.getPositions(apiKey);
+      
+      // Parse positions
+      final data = res['data'];
+      if (data is List) {
+        final positions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
+        debugPrint('[POSITIONS] Found ${positions.length} positions');
+        if (mounted) {
+          setState(() => _positions = positions);
+        }
+      } else {
+        debugPrint('[POSITIONS] No positions data');
+        if (mounted) {
+          setState(() => _positions = []);
+        }
+      }
+    } catch (e) {
+      debugPrint('[POSITIONS] Error: $e');
+      if (!mounted || silent) return;
+      
+      final msg = e.toString();
+      final is451Error = msg.contains('451') || msg.contains('Unavailable For Legal Reasons');
+      
+      if (is451Error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Extended Exchange is not available in your region. Use VPN instead.'),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+      
+      // Set empty positions on error
+      if (mounted) {
+        setState(() => _positions = []);
+      }
+    } finally {
+      if (mounted && !silent) {
+        setState(() => _loadingPositions = false);
+      }
+    }
+  }
+
+  Widget _buildTabContent() {
+    switch (_selectedTabIndex) {
+      case 0: // Position
+        return _buildPositionsTab();
+      case 1: // Orders
+        return _buildOrdersTab();
+      case 2: // Realize
+        return _buildRealizeTab();
+      default:
+        return const SizedBox();
+    }
+  }
+
+  Widget _buildPositionsTab() {
+    if (_loadingPositions) {
+      return const Center(
+        child: CircularProgressIndicator(color: _colorGreenPrimary),
+      );
+    }
+
+    if (_positions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.account_balance_wallet_outlined,
+              size: 48,
+              color: _colorTextSecondary.withOpacity(0.5),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No positions yet',
+              style: TextStyle(
+                color: Color(0xFF808080),
+                fontSize: 15,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () {
+                // TODO: Navigate to trade page
+              },
+              child: const Text(
+                'Start trading',
+                style: TextStyle(
+                  color: _colorGreenPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _positions.length,
+      itemBuilder: (context, index) {
+        final position = _positions[index];
+        return _buildPositionCard(position);
+      },
+    );
+  }
+
+  Widget _buildPositionCard(Map<String, dynamic> position) {
+    final market = position['market'] ?? 'Unknown';
+    final size = position['size']?.toString() ?? '0';
+    final side = position['side']?.toString().toUpperCase() ?? 'UNKNOWN';
+    final entryPrice = position['entryPrice']?.toString() ?? '0';
+    final markPrice = position['markPrice']?.toString() ?? '0';
+    final unrealizedPnl = position['unrealizedPnl']?.toString() ?? '0';
+    final liquidationPrice = position['liquidationPrice']?.toString() ?? 'N/A';
+    
+    // Parse PNL to determine color
+    final pnlValue = double.tryParse(unrealizedPnl) ?? 0;
+    final pnlColor = pnlValue >= 0 ? _colorGreenPrimary : const Color(0xFFFF4D4D);
+    final sideColor = side == 'LONG' ? _colorGreenPrimary : const Color(0xFFFF4D4D);
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _colorBgElevated,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF2A2A2A), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header: Market and Side
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                market,
+                style: const TextStyle(
+                  color: _colorTextMain,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: sideColor.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  side,
+                  style: TextStyle(
+                    color: sideColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Position details
+          Row(
+            children: [
+              Expanded(
+                child: _buildPositionDetail('Size', size),
+              ),
+              Expanded(
+                child: _buildPositionDetail('Entry Price', '\$$entryPrice'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+          Expanded(
+                child: _buildPositionDetail('Mark Price', '\$$markPrice'),
+              ),
+              Expanded(
+                child: _buildPositionDetail('Liq. Price', liquidationPrice != 'N/A' ? '\$$liquidationPrice' : liquidationPrice),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Unrealized PNL
+          Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+              color: pnlColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Unrealized PNL',
+                  style: TextStyle(
+                    color: _colorTextSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+                Text(
+                  '${pnlValue >= 0 ? '+' : ''}\$$unrealizedPnl',
+                  style: TextStyle(
+                    color: pnlColor,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPositionDetail(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: _colorTextSecondary,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(
+            color: _colorTextMain,
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOrdersTab() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.receipt_long_outlined,
+            size: 48,
+            color: _colorTextSecondary.withOpacity(0.5),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Orders tab - Coming soon',
+            style: TextStyle(
+              color: Color(0xFF808080),
+              fontSize: 15,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRealizeTab() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.history,
+            size: 48,
+            color: _colorTextSecondary.withOpacity(0.5),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Realize tab - Coming soon',
+            style: TextStyle(
+              color: Color(0xFF808080),
+              fontSize: 15,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -847,6 +1422,15 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     // Ensure WC core is initialized and check for existing connection
     Future.microtask(() async {
       await ref.read(walletServiceProvider).init();
+      
+      // Load cached API key FIRST to prevent flickering
+      await _loadCachedApiKeyIfAny();
+      
+      // Now safe to stop showing loading state
+      if (mounted) {
+        setState(() => _checkingState = false);
+      }
+      
       // Fetch referral code from backend on first app start (if not already stored)
       final storedRefCode = await LocalStore.loadReferralCode();
       if (storedRefCode == null || storedRefCode.isEmpty) {
@@ -866,11 +1450,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       // Auto-load balances if API key exists (even without wallet connection)
       final stored = await LocalStore.loadApiKeyForAccount(0);
       if (stored['walletAddress'] != null && stored['apiKey'] != null) {
-        debugPrint('[INIT] API key found, auto-loading balances');
+        debugPrint('[INIT] API key found, auto-loading balances and positions in background');
         try {
-          await _fetchBalances();
+          await _fetchBalances(silent: true);
+          await _fetchPositions(silent: true);
         } catch (e) {
-          debugPrint('[INIT] Failed to auto-load balances: $e');
+          debugPrint('[INIT] Failed to auto-load data: $e');
           // If balance fetch fails, show error and require reconnection
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -911,13 +1496,19 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         }
       });
     });
-    _loadCachedApiKeyIfAny();
   }
 
   String? _lastConnectedAddress;
-  
+
   @override
   Widget build(BuildContext context) {
+    // Show loading state while checking cached data
+    if (_checkingState) {
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
+    }
+    
     final svc = ref.watch(walletServiceProvider);
     
     // Check for connection changes in build method (more reliable than listener)
@@ -937,88 +1528,197 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       _lastConnectedAddress = null;
     }
     
-    return Padding(
-      padding: const EdgeInsets.all(16),
+    // Determine if user is ready to trade (has API key and Stark keys)
+    final bool hasApiKey = _cachedApiKey != null && _cachedApiKey!.isNotEmpty;
+    final bool isReadyToTrade = hasApiKey; // Will also check Stark keys in future
+    
+    // Show onboarding/connecting state
+    if (_onboarding) {
+      return _buildOnboardingState();
+    }
+    
+    // Show appropriate UI based on state
+    if (isReadyToTrade) {
+      return _buildReadyToTradeUI();
+    } else {
+      return _buildNotConnectedUI(svc);
+    }
+  }
+  
+  Widget _buildOnboardingState() {
+    return Center(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      svc.isConnected 
-                          ? 'Wallet: ${svc.address}' 
-                          : (_cachedWalletAddress != null 
-                              ? 'API Key Mode: $_cachedWalletAddress' 
-                              : 'No wallet connected'),
-                      style: const TextStyle(color: _colorTextMain),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (!svc.isConnected && _cachedWalletAddress != null)
-                      const Text(
-                        'Read-only mode (API key stored). Connect wallet to place orders.',
-                        style: TextStyle(color: _colorTextSecondary, fontSize: 12),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (svc.isConnected) ...[
-                OutlinedButton(onPressed: _disconnect, child: const Text('Disconnect')),
-              ] else ...[
-                FilledButton(
-                  onPressed: svc.isConnecting ? null : _connectWallet,
-                  child: svc.isConnecting
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('Connect'),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton(onPressed: _connectWalletQr, child: const Text('Show QR')),
-              ],
-            ],
+          const SizedBox(width: 48, height: 48, child: CircularProgressIndicator(strokeWidth: 3)),
+          const SizedBox(height: 24),
+          const Text(
+            'Setting up your account...',
+            style: TextStyle(color: _colorTextMain, fontSize: 16, fontWeight: FontWeight.w500),
           ),
-          const SizedBox(height: 16),
-          if (svc.isConnected && _onboarding) ...[
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
-                    SizedBox(height: 8),
-                    Text('Setting up your account...', style: TextStyle(color: _colorTextSecondary)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
-          FilledButton(
-            onPressed: !_loading ? _fetchBalances : null,
-            child: _loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Fetch Balances'),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: _colorBgElevated,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: SingleChildScrollView(
-                child: Text(
-                  _balances.isEmpty ? 'No balances loaded' : _balances,
-                  style: const TextStyle(color: _colorTextMain),
-                ),
-              ),
-            ),
+          const SizedBox(height: 8),
+          const Text(
+            'Please check your wallet app to sign',
+            style: TextStyle(color: _colorTextSecondary, fontSize: 14),
+            textAlign: TextAlign.center,
           ),
         ],
       ),
     );
+  }
+  
+  Widget _buildNotConnectedUI(WalletService svc) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // Extended Logo
+            _ExtendedLogo(),
+            const SizedBox(height: 48),
+            // Start Trading Button
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: FilledButton(
+                onPressed: svc.isConnecting ? null : _connectWallet,
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFE5E5E5),
+                  foregroundColor: const Color(0xFF1A1A1A),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: svc.isConnecting
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF1A1A1A)))
+                    : const Text(
+                        'Start Trading',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            // Helper text about signatures
+            const Text(
+              'Connect your wallet to start trading\n\nYou will need to sign 4 times:\n• 2 signatures for account creation\n• 2 signatures for API key issuance',
+              style: TextStyle(
+                color: Color(0xFF808080),
+                fontSize: 13,
+                height: 1.5,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildReadyToTradeUI() {
+    // Parse equity from balances
+    String equity = _loading ? '...' : _parseEquity();
+    
+    return Column(
+      children: [
+        // Equity Section
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+          child: Column(
+            children: [
+              const Text(
+                'Equity',
+                style: TextStyle(
+                  color: Color(0xFF808080),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                equity,
+                style: const TextStyle(
+                  color: _colorTextMain,
+                  fontSize: 32,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 24),
+              // Deposit and Withdraw buttons
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+                  _ActionButton(
+                    icon: Icons.arrow_downward,
+                    label: 'Deposit',
+                    onTap: () {
+                      // TODO: Implement deposit
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Deposit coming soon')),
+                      );
+                    },
+                  ),
+                  const SizedBox(width: 16),
+                  _ActionButton(
+                    icon: Icons.arrow_upward,
+                    label: 'Withdraw',
+                    onTap: () {
+                      // TODO: Implement withdraw
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Withdraw coming soon')),
+                      );
+                    },
+          ),
+        ],
+      ),
+            ],
+          ),
+        ),
+        // Divider
+        Container(
+          height: 1,
+          color: const Color(0xFF2A2A2A),
+        ),
+        // Tabs
+        _PortfolioTabs(
+          selectedIndex: _selectedTabIndex,
+          onTabSelected: (index) {
+            setState(() => _selectedTabIndex = index);
+            if (index == 0 && _positions.isEmpty) {
+              _fetchPositions();
+            }
+          },
+        ),
+        // Content
+        Expanded(
+          child: _buildTabContent(),
+        ),
+      ],
+    );
+  }
+  
+  String _parseEquity() {
+    if (_balances.isEmpty) {
+      return '\$0.00';
+    }
+    
+    try {
+      // Try to extract equity from balance string
+      final equityMatch = RegExp(r'Equity:\s*([\d.,]+)').firstMatch(_balances);
+      if (equityMatch != null) {
+        final value = equityMatch.group(1)!;
+        return '\$$value';
+      }
+      
+      // If balance is "0", show $0.00
+      if (_balances.contains('Balance: 0') || _balances.contains('balance is 0')) {
+        return '\$0.00';
+      }
+      
+      return '\$0.00';
+    } catch (e) {
+      return '\$0.00';
+    }
   }
 
   Future<void> _startOnboarding() async {
@@ -1076,7 +1776,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           throw TimeoutException('Wallet did not respond. Please check your wallet app and approve the signature request.');
         });
         debugPrint('[ONBOARD] Got first signature successfully');
-      } catch (e) {
+    } catch (e) {
         debugPrint('[ONBOARD] First signature error: $e');
         // If app was in background, wait a bit and check if signature came through
         await Future.delayed(const Duration(seconds: 2));
@@ -1172,10 +1872,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         await _ensureApiKeyPresent(address);
         debugPrint('[ONBOARD] API key issued successfully');
         
-        // Auto-load balances after API key is ready
+        // Auto-load balances and positions after API key is ready
         if (mounted) {
           try {
             await _fetchBalances();
+            await _fetchPositions(silent: true);
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Onboarding complete! Balances loaded.')));
             }
@@ -1262,7 +1963,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       } catch (e) {
         debugPrint('[APIKEY] Warning: Failed to sync API key to backend: $e');
       }
-      if (mounted) setState(() => _cachedApiKey = existing);
+      if (mounted) {
+        setState(() => _cachedApiKey = existing);
+        // Update portfolio state provider so app bar shows correct state
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          ref.read(_portfolioStateProvider.notifier).updateState(walletAddress, true);
+        });
+      }
     }
   }
 
@@ -1278,6 +1985,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           _cachedApiKey = existing;
           _cachedWalletAddress = address;
         });
+        // Update portfolio state provider so app bar shows correct state
+        final hasApiKey = existing != null && existing.isNotEmpty;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          ref.read(_portfolioStateProvider.notifier).updateState(address, hasApiKey);
+        });
       }
       return;
     }
@@ -1290,6 +2002,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         _cachedWalletAddress = stored['walletAddress'];
       });
       debugPrint('[LOAD] Loaded API key for wallet ${stored['walletAddress']} (no wallet connected)');
+      // Update portfolio state provider so app bar shows correct state
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(_portfolioStateProvider.notifier).updateState(
+          stored['walletAddress'] as String,
+          true, // Has API key
+        );
+      });
     }
   }
 
@@ -1376,6 +2095,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
       setState(() => _cachedApiKey = key);
       
+      // Update portfolio state provider so app bar shows correct state
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(_portfolioStateProvider.notifier).updateState(address, true);
+      });
+      
       // Verify API key was saved correctly
       final verifyKey = await LocalStore.loadApiKey(walletAddress: address, accountIndex: 0);
       if (verifyKey != key) {
@@ -1428,7 +2152,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         }
         
         final accountData = accountInfo['data'] as Map<String, dynamic>?;
-        final vault = accountData?['l2Vault'] as int?;
+        // l2Vault can be either String or int, handle both
+        final vaultValue = accountData?['l2Vault'];
+        final vault = vaultValue is String ? int.tryParse(vaultValue) : (vaultValue as int?);
         
         // Get Stark keys from onboarding response (stored earlier)
         final starkKeys = await LocalStore.loadStarkKeys(walletAddress: address, accountIndex: 0);
@@ -1638,6 +2364,136 @@ class _MarketAvatar extends StatelessWidget {
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+// Portfolio UI Components
+class _ExtendedLogo extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _loadLogo(),
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          return SvgPicture.string(
+            snapshot.data!,
+            width: 140,
+            height: 26,
+          );
+        }
+        // Fallback text logo
+        return const Text(
+          'extended',
+          style: TextStyle(
+            color: _colorTextMain,
+            fontSize: 28,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.5,
+          ),
+        );
+      },
+    );
+  }
+  
+  Future<String> _loadLogo() async {
+    try {
+      final response = await http.get(Uri.parse('https://app.extended.exchange/assets/logo/extended-long.svg'));
+      if (response.statusCode == 200) {
+        return response.body;
+      }
+    } catch (e) {
+      debugPrint('[LOGO] Failed to load: $e');
+    }
+    // Return a simple text fallback in SVG format
+    return '''<svg xmlns="http://www.w3.org/2000/svg" width="107" height="19" viewBox="0 0 107 19"><text x="0" y="15" fill="white" font-family="Arial" font-size="16">extended</text></svg>''';
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  
+  const _ActionButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 100,
+        height: 64,
+        decoration: BoxDecoration(
+          color: const Color(0xFF2A2A2A),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: _colorTextMain, size: 24),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: const TextStyle(
+                color: _colorTextMain,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PortfolioTabs extends StatelessWidget {
+  final int selectedIndex;
+  final Function(int) onTabSelected;
+  
+  const _PortfolioTabs({
+    required this.selectedIndex,
+    required this.onTabSelected,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    final tabs = ['Position', 'Orders', 'Realize'];
+    
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: Row(
+        children: List.generate(tabs.length, (index) {
+          final isSelected = index == selectedIndex;
+          return Expanded(
+            child: InkWell(
+              onTap: () => onTabSelected(index),
+              child: Container(
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: isSelected ? _colorGreenPrimary.withOpacity(0.15) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  tabs[index],
+                  style: TextStyle(
+                    color: isSelected ? _colorGreenPrimary : _colorTextSecondary,
+                    fontSize: 14,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ),
+            ),
+          );
+        }),
       ),
     );
   }

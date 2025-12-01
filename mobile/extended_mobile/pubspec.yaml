@@ -26,6 +26,7 @@ dependencies:
   connectivity_plus: ^6.0.5
   url_launcher: ^6.3.0
   qr_flutter: ^4.1.0
+  http: ^1.2.0
 
 dev_dependencies:
   flutter_test:

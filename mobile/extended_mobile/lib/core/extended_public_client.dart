@@ -11,7 +11,33 @@ class ExtendedPublicClient {
     receiveTimeout: const Duration(seconds: 20),
   ));
 
-  Future<List<MarketRow>> getMarkets() async {
+  // Get cached markets immediately (synchronous)
+  Future<List<MarketRow>?> getCachedMarkets() async {
+    final cached = await LocalStore.loadMarketsJson();
+    if (cached != null && cached.isNotEmpty) {
+      final rows = cached.map((e) => MarketRow.fromJson(e)).toList()
+        ..sort((a, b) => b.dailyVolume.compareTo(a.dailyVolume));
+      return rows;
+    }
+    return null;
+  }
+
+  Future<List<MarketRow>> getMarkets({bool silent = false}) async {
+    // First, try to return cached data immediately if available
+    if (!silent) {
+      final cached = await getCachedMarkets();
+      if (cached != null) {
+        // Return cached data immediately, then fetch fresh in background
+        getMarkets(silent: true).then((fresh) {
+          // Fresh data will be cached automatically
+        }).catchError((_) {
+          // Ignore errors in silent background fetch
+        });
+        return cached;
+      }
+    }
+    
+    // If no cache or silent mode, fetch fresh data
     try {
       final res = await _dio.get('/info/markets');
       final data = res.data;
