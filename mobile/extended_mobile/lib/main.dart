@@ -1127,6 +1127,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       
       // Parse positions
       final data = res['data'];
+      
       if (data is List) {
         final positions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
         debugPrint('[POSITIONS] Found ${positions.length} positions');
@@ -1134,7 +1135,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           setState(() => _positions = positions);
         }
       } else {
-        debugPrint('[POSITIONS] No positions data');
+        debugPrint('[POSITIONS] No positions data (data is not a List)');
         if (mounted) {
           setState(() => _positions = []);
         }
@@ -1235,17 +1236,84 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     );
   }
 
+  // Smart price formatter based on price magnitude
+  String _formatPrice(dynamic value) {
+    if (value == null) return '0';
+    
+    final price = value is String ? (double.tryParse(value) ?? 0.0) : (value as num).toDouble();
+    
+    if (price == 0) return '0';
+    
+    final absPrice = price.abs();
+    
+    String formatted;
+    
+    // For prices >= $100, show 2 decimals (e.g., 1234.56)
+    if (absPrice >= 100) {
+      formatted = price.toStringAsFixed(2);
+    }
+    // For prices >= $1, show up to 4 decimals (e.g., 12.3456)
+    else if (absPrice >= 1) {
+      formatted = price.toStringAsFixed(4);
+    }
+    // For prices >= $0.0001, show up to 5 decimals (e.g., 0.07760)
+    else if (absPrice >= 0.0001) {
+      formatted = price.toStringAsFixed(5);
+    }
+    // For very small prices, show up to 8 decimals (e.g., 0.00000988)
+    else if (absPrice >= 0.00000001) {
+      formatted = price.toStringAsFixed(8);
+    }
+    // For extremely small prices, use scientific notation (e.g., 9.88e-9)
+    else {
+      return price.toStringAsExponential(2);
+    }
+    
+    // Remove trailing zeros and decimal point if .00
+    return formatted.replaceAll(RegExp(r'\.?0+$'), '');
+  }
+
   Widget _buildPositionCard(Map<String, dynamic> position) {
+    // Extended API uses camelCase keys (NOT snake_case!)
     final market = position['market'] ?? 'Unknown';
-    final size = position['size']?.toString() ?? '0';
-    final side = position['side']?.toString().toUpperCase() ?? 'UNKNOWN';
-    final entryPrice = position['entryPrice']?.toString() ?? '0';
-    final markPrice = position['markPrice']?.toString() ?? '0';
-    final unrealizedPnl = position['unrealizedPnl']?.toString() ?? '0';
-    final liquidationPrice = position['liquidationPrice']?.toString() ?? 'N/A';
+    final sizeStr = position['size']?.toString() ?? '0';
+    final side = (position['side']?.toString() ?? '').toUpperCase();
+    final leverageRaw = position['leverage'];
+    
+    // Parse numeric values - Extended API actual field names (camelCase):
+    // openPrice, markPrice, liquidationPrice, unrealisedPnl (British spelling!)
+    final entryPriceRaw = position['openPrice'];
+    final markPriceRaw = position['markPrice'];
+    final unrealizedPnlRaw = position['unrealisedPnl']; // Note: British spelling "unrealised"
+    final liquidationPriceRaw = position['liquidationPrice'];
+    final valueRaw = position['value']; // Position value in USD
+    final marginRaw = position['margin']; // Margin used
+    
+    // Format prices
+    final size = _formatPrice(sizeStr);
+    final entryPrice = _formatPrice(entryPriceRaw);
+    final markPrice = _formatPrice(markPriceRaw);
+    final value = _formatPrice(valueRaw);
+    final margin = _formatPrice(marginRaw);
+    
+    // liquidationPrice can be 0 (no liq price) or null
+    final liqPriceValue = liquidationPriceRaw is String 
+        ? (double.tryParse(liquidationPriceRaw) ?? 0.0)
+        : (liquidationPriceRaw as num?)?.toDouble() ?? 0.0;
+    final liquidationPrice = (liquidationPriceRaw != null && liqPriceValue > 0) 
+        ? _formatPrice(liquidationPriceRaw) 
+        : null;
+    
+    final leverage = leverageRaw != null 
+        ? '${_formatPrice(leverageRaw)}x'
+        : '';
     
     // Parse PNL to determine color
-    final pnlValue = double.tryParse(unrealizedPnl) ?? 0;
+    final pnlValue = unrealizedPnlRaw is String 
+        ? (double.tryParse(unrealizedPnlRaw) ?? 0.0)
+        : (unrealizedPnlRaw as num?)?.toDouble() ?? 0.0;
+    final unrealizedPnl = pnlValue.toStringAsFixed(2);
+    
     final pnlColor = pnlValue >= 0 ? _colorGreenPrimary : const Color(0xFFFF4D4D);
     final sideColor = side == 'LONG' ? _colorGreenPrimary : const Color(0xFFFF4D4D);
     
@@ -1272,43 +1340,72 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: sideColor.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(4),
-                ),
+              Row(
+                children: [
+                  if (leverage.isNotEmpty) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _colorTextSecondary.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
                 child: Text(
-                  side,
-                  style: TextStyle(
-                    color: sideColor,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+                        leverage,
+                        style: const TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: sideColor.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      side,
+                      style: TextStyle(
+                        color: sideColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
-                ),
+                ],
               ),
             ],
           ),
           const SizedBox(height: 12),
-          // Position details
+          // Position details - Row 1: Size, Value, Margin
           Row(
             children: [
               Expanded(
                 child: _buildPositionDetail('Size', size),
               ),
               Expanded(
-                child: _buildPositionDetail('Entry Price', '\$$entryPrice'),
+                child: _buildPositionDetail('Value', '\$$value'),
+              ),
+              Expanded(
+                child: _buildPositionDetail('Margin', '\$$margin'),
               ),
             ],
           ),
           const SizedBox(height: 8),
+          // Row 2: Entry, Mark, Liq
           Row(
             children: [
-          Expanded(
-                child: _buildPositionDetail('Mark Price', '\$$markPrice'),
+              Expanded(
+                child: _buildPositionDetail('Entry', '\$$entryPrice'),
               ),
               Expanded(
-                child: _buildPositionDetail('Liq. Price', liquidationPrice != 'N/A' ? '\$$liquidationPrice' : liquidationPrice),
+                child: _buildPositionDetail('Mark', '\$$markPrice'),
+              ),
+              Expanded(
+                child: _buildPositionDetail('Liq.', liquidationPrice != null ? '\$$liquidationPrice' : 'N/A'),
               ),
             ],
           ),
@@ -1619,81 +1716,92 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     // Parse equity from balances
     String equity = _loading ? '...' : _parseEquity();
     
-    return Column(
-      children: [
-        // Equity Section
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
-          child: Column(
-            children: [
-              const Text(
-                'Equity',
-                style: TextStyle(
-                  color: Color(0xFF808080),
-                  fontSize: 14,
-                  fontWeight: FontWeight.w400,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                equity,
-                style: const TextStyle(
-                  color: _colorTextMain,
-                  fontSize: 32,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 24),
-              // Deposit and Withdraw buttons
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-                  _ActionButton(
-                    icon: Icons.arrow_downward,
-                    label: 'Deposit',
-                    onTap: () {
-                      // TODO: Implement deposit
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Deposit coming soon')),
-                      );
-                    },
+    return NestedScrollView(
+      headerSliverBuilder: (context, innerBoxIsScrolled) {
+        return [
+          // Collapsible header
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                // Equity Section - Reduced padding
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+                  child: Column(
+                    children: [
+                      const Text(
+                        'Equity',
+                        style: TextStyle(
+                          color: Color(0xFF808080),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        equity,
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 28,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      // Deposit and Withdraw buttons
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _ActionButton(
+                            icon: Icons.arrow_downward,
+                            label: 'Deposit',
+                            onTap: () {
+                              // TODO: Implement deposit
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Deposit coming soon')),
+                              );
+                            },
+                          ),
+                          const SizedBox(width: 16),
+                          _ActionButton(
+                            icon: Icons.arrow_upward,
+                            label: 'Withdraw',
+                            onTap: () {
+                              // TODO: Implement withdraw
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Withdraw coming soon')),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 16),
-                  _ActionButton(
-                    icon: Icons.arrow_upward,
-                    label: 'Withdraw',
-                    onTap: () {
-                      // TODO: Implement withdraw
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Withdraw coming soon')),
-                      );
-                    },
+                ),
+                // Divider
+                Container(
+                  height: 1,
+                  color: const Color(0xFF2A2A2A),
+                ),
+              ],
+            ),
           ),
-        ],
-      ),
-            ],
+          // Pinned tabs
+          SliverPersistentHeader(
+            pinned: true,
+            delegate: _TabsHeaderDelegate(
+              child: _PortfolioTabs(
+                selectedIndex: _selectedTabIndex,
+                onTabSelected: (index) {
+                  setState(() => _selectedTabIndex = index);
+                  if (index == 0 && _positions.isEmpty) {
+                    _fetchPositions();
+                  }
+                },
+              ),
+            ),
           ),
-        ),
-        // Divider
-        Container(
-          height: 1,
-          color: const Color(0xFF2A2A2A),
-        ),
-        // Tabs
-        _PortfolioTabs(
-          selectedIndex: _selectedTabIndex,
-          onTabSelected: (index) {
-            setState(() => _selectedTabIndex = index);
-            if (index == 0 && _positions.isEmpty) {
-              _fetchPositions();
-            }
-          },
-        ),
-        // Content
-        Expanded(
-          child: _buildTabContent(),
-        ),
-      ],
+        ];
+      },
+      body: _buildTabContent(),
     );
   }
   
@@ -1706,8 +1814,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       // Try to extract equity from balance string
       final equityMatch = RegExp(r'Equity:\s*([\d.,]+)').firstMatch(_balances);
       if (equityMatch != null) {
-        final value = equityMatch.group(1)!;
-        return '\$$value';
+        final valueStr = equityMatch.group(1)!.replaceAll(',', '');
+        final value = double.tryParse(valueStr) ?? 0.0;
+        return '\$${value.toStringAsFixed(2)}';
       }
       
       // If balance is "0", show $0.00
@@ -2451,6 +2560,32 @@ class _ActionButton extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// Delegate for pinned tabs header
+class _TabsHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final Widget child;
+
+  _TabsHeaderDelegate({required this.child});
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Container(
+      color: const Color(0xFF1A1A1A), // _colorBgMain
+      child: child,
+    );
+  }
+
+  @override
+  double get maxExtent => 48.0;
+
+  @override
+  double get minExtent => 48.0;
+
+  @override
+  bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) {
+    return false;
   }
 }
 
