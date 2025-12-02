@@ -9,6 +9,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
+import 'package:intl/intl.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
@@ -359,19 +361,96 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
   late final TabController _tabController;
   final TextEditingController _search = TextEditingController();
   Set<String> _watchlist = <String>{};
+  WebSocket? _marketWebSocket;
+  StreamSubscription? _marketWsSubscription;
+  final Map<String, double> _liveMarkPrices = {};
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _loadWatchlist();
+    _connectMarketWebSocket();
   }
 
   @override
   void dispose() {
+    _disconnectMarketWebSocket();
     _tabController.dispose();
     _search.dispose();
     super.dispose();
+  }
+
+  Future<void> _connectMarketWebSocket() async {
+    // Public Mark Price stream (no auth). We subscribe to all markets.
+    String wsBase = dotenv.env['EXTENDED_WS_BASE_URL']?.trim() ??
+        'wss://api.starknet.extended.exchange/stream.extended.exchange/v1';
+    if (wsBase.startsWith('https://')) {
+      wsBase = wsBase.replaceFirst('https://', 'wss://');
+    } else if (!wsBase.startsWith('wss://') && !wsBase.startsWith('ws://')) {
+      wsBase = 'wss://$wsBase';
+    }
+
+    final uri = Uri.parse('$wsBase/prices/mark');
+    debugPrint('[MARKET_WS] Connecting to $uri');
+
+    try {
+      final socket = await WebSocket.connect(uri.toString());
+      _marketWebSocket = socket;
+
+      _marketWsSubscription = socket.listen(
+        (message) {
+          try {
+            final data = jsonDecode(message as String) as Map<String, dynamic>;
+            if (data['type'] == 'MP') {
+              final payload = data['data'] as Map<String, dynamic>? ?? {};
+              final market = payload['m']?.toString();
+              final priceStr = payload['p']?.toString();
+              final price = priceStr != null ? double.tryParse(priceStr) : null;
+
+              if (market != null && price != null) {
+                // Update live prices for visible markets
+                if (mounted) {
+                  setState(() {
+                    _liveMarkPrices[market] = price;
+                  });
+                } else {
+                  _liveMarkPrices[market] = price;
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('[MARKET_WS] Error parsing message: $e');
+          }
+        },
+        onError: (error) {
+          debugPrint('[MARKET_WS] Stream error: $error');
+        },
+        onDone: () {
+          debugPrint('[MARKET_WS] Stream closed');
+        },
+        cancelOnError: false,
+      );
+
+      debugPrint('[MARKET_WS] Connected');
+    } catch (e) {
+      debugPrint('[MARKET_WS] Connection error: $e');
+    }
+  }
+
+  Future<void> _disconnectMarketWebSocket() async {
+    try {
+      await _marketWsSubscription?.cancel();
+    } catch (_) {}
+    _marketWsSubscription = null;
+
+    try {
+      await _marketWebSocket?.close();
+    } catch (_) {}
+    _marketWebSocket = null;
+
+    _liveMarkPrices.clear();
+    debugPrint('[MARKET_WS] Disconnected');
   }
 
   Future<void> _loadWatchlist() async {
@@ -448,7 +527,12 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
                     final filtered = query.isEmpty
                         ? rows
                         : rows.where((r) => r.name.toLowerCase().contains(query) || r.assetName.toLowerCase().contains(query)).toList();
-                    return _MarketsList(rows: filtered, watchlist: _watchlist, onToggle: _toggleWatchlist);
+                    return _MarketsList(
+                      rows: filtered,
+                      watchlist: _watchlist,
+                      onToggle: _toggleWatchlist,
+                      liveMarkPrices: _liveMarkPrices,
+                    );
                   },
                   loading: () => const ListTile(title: Center(child: CircularProgressIndicator())),
                   error: (e, _) => ListView(
@@ -469,7 +553,12 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
                     if (onlyWl.isEmpty) {
                       return ListView(children: const [ListTile(title: Text('Watchlist is empty'))]);
                     }
-                    return _MarketsList(rows: onlyWl, watchlist: _watchlist, onToggle: _toggleWatchlist);
+                    return _MarketsList(
+                      rows: onlyWl,
+                      watchlist: _watchlist,
+                      onToggle: _toggleWatchlist,
+                      liveMarkPrices: _liveMarkPrices,
+                    );
                   },
                   loading: () => const ListTile(title: Center(child: CircularProgressIndicator())),
                   error: (e, _) => ListView(
@@ -494,7 +583,14 @@ class _MarketsList extends StatelessWidget {
   final List<MarketRow> rows;
   final Set<String> watchlist;
   final void Function(String name, bool add) onToggle;
-  const _MarketsList({required this.rows, required this.watchlist, required this.onToggle});
+  final Map<String, double> liveMarkPrices;
+
+  const _MarketsList({
+    required this.rows,
+    required this.watchlist,
+    required this.onToggle,
+    required this.liveMarkPrices,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -529,6 +625,7 @@ class _MarketsList extends StatelessWidget {
             );
           }
           final r = rows[i - 1];
+          final livePrice = liveMarkPrices[r.name];
           final positive = r.dailyChangePercent >= 0;
           final color = positive ? _colorGain : _colorLoss;
           final logoUrl = _logoUrl(r.assetName);
@@ -599,7 +696,9 @@ class _MarketsList extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
                                 Text(
-                                  r.lastPricePretty,
+                                  livePrice != null
+                                      ? NumberFormat.currency(symbol: '\$').format(livePrice)
+                                      : r.lastPricePretty,
                                   textAlign: TextAlign.right,
                                   overflow: TextOverflow.ellipsis,
                                   softWrap: false,
