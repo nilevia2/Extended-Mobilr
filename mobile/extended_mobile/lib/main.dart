@@ -20,6 +20,7 @@ import 'core/local_store.dart';
 import 'core/wallet_connect.dart';
 import 'core/backend_client.dart';
 import 'core/extended_client.dart';
+import 'core/extended_websocket.dart';
 
 // Extended theme palette
 const _colorGreenPrimary = Color(0xFF00BC84);
@@ -665,6 +666,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   bool _loadingOrders = false;
   int _selectedTabIndex = 0; // 0: Position, 1: Orders, 2: Realize
   String _selectedTimeRange = '1 Week'; // Time filter for realized PNL
+  ExtendedWebSocket? _websocket;
+  StreamSubscription<Map<String, dynamic>>? _balanceSubscription;
 
   Future<void> _connectWallet() async {
     debugPrint('[CONNECT] Starting wallet connection...');
@@ -974,7 +977,71 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     // Update portfolio state provider IMMEDIATELY to clear wallet address from app bar
     ref.read(_portfolioStateProvider.notifier).updateState(null, false);
     
+    // Disconnect websocket
+    await _disconnectWebSocket();
+    
     debugPrint('[LOGOUT] Logout complete - wallet address cleared');
+  }
+  
+  /// Connect to websocket for real-time balance updates
+  Future<void> _connectWebSocket(String apiKey) async {
+    try {
+      // Disconnect existing connection if any
+      await _disconnectWebSocket();
+      
+      debugPrint('[WS] Connecting websocket for balance updates');
+      _websocket = ExtendedWebSocket();
+      await _websocket!.connect(apiKey);
+      
+      // Listen to balance updates
+      _balanceSubscription = _websocket!.balanceUpdates.listen(
+        (message) {
+          debugPrint('[WS] Balance update received');
+          final balanceData = message['data']?['balance'] as Map<String, dynamic>?;
+          if (balanceData != null && mounted) {
+            // Format balance response similar to REST API
+            final balance = balanceData['balance']?.toString() ?? '0';
+            final equity = balanceData['equity']?.toString() ?? '0';
+            final availableBalance = balanceData['availableForTrade']?.toString() ?? '0';
+            
+            final balanceStr = StringBuffer();
+            balanceStr.writeln('Balance: $balance');
+            balanceStr.writeln('Equity: $equity');
+            balanceStr.writeln('Available: $availableBalance');
+            
+            // Update UI with real-time balance
+            setState(() {
+              _balances = balanceStr.toString();
+            });
+            
+            // Update cache
+            LocalStore.saveCachedBalance(balanceStr.toString());
+            
+            debugPrint('[WS] Balance updated: Equity=$equity');
+          }
+        },
+        onError: (error) {
+          debugPrint('[WS] Balance stream error: $error');
+        },
+      );
+      
+      debugPrint('[WS] Websocket connected and listening for balance updates');
+    } catch (e) {
+      debugPrint('[WS] Failed to connect websocket: $e');
+      // Don't throw - websocket is optional, REST API will still work
+    }
+  }
+  
+  /// Disconnect websocket
+  Future<void> _disconnectWebSocket() async {
+    _balanceSubscription?.cancel();
+    _balanceSubscription = null;
+    
+    if (_websocket != null) {
+      await _websocket!.disconnect();
+      _websocket = null;
+      debugPrint('[WS] Websocket disconnected');
+    }
   }
 
   // Public wrapper methods for app bar menu
@@ -3039,6 +3106,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           true,
         );
         
+        // Connect websocket for real-time balance updates
+        _connectWebSocket(stored['apiKey']!);
+        
         debugPrint('[PORTFOLIO_INIT] API key state loaded - preventing UI glitch');
       }
       
@@ -3826,6 +3896,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
       setState(() => _cachedApiKey = key);
       
+      // Connect websocket for real-time balance updates
+      _connectWebSocket(key);
+      
       // Update portfolio state provider so app bar shows correct state
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ref.read(_portfolioStateProvider.notifier).updateState(address, true);
@@ -3991,6 +4064,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         );
       },
     );
+  }
+  
+  @override
+  void dispose() {
+    _disconnectWebSocket();
+    super.dispose();
   }
 }
 
