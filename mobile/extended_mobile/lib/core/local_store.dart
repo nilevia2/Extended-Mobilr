@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -12,6 +13,10 @@ class LocalStore {
   static const _vaultPrefix = 'vault_for_'; // suffixed with <address>_<index>
   static const _walletAddressPrefix = 'wallet_address_for_'; // suffixed with <address>_<index>
   static const _referralCodeKey = 'referral_code';
+  static const _cachedBalanceKey = 'cached_balance';
+  static const _cachedPositionsKey = 'cached_positions';
+  static const _cachedOrdersKey = 'cached_orders';
+  static const _cachedClosedPositionsKey = 'cached_closed_positions';
   
   // Secure storage for encrypted sensitive keys
   static const _secureStorage = FlutterSecureStorage(
@@ -160,6 +165,77 @@ class LocalStore {
       'starkPublicKey': starkPublicKey,
       'vault': vault,
     };
+  }
+  
+  // Cache methods for fast UI loading
+  static Future<void> saveCachedBalance(String balance) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cachedBalanceKey, balance);
+  }
+  
+  static Future<String?> loadCachedBalance() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_cachedBalanceKey);
+  }
+  
+  static Future<void> saveCachedPositions(List<Map<String, dynamic>> positions) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cachedPositionsKey, jsonEncode(positions));
+  }
+  
+  static Future<List<Map<String, dynamic>>?> loadCachedPositions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_cachedPositionsKey);
+    if (raw == null) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[CACHE] Error loading cached positions: $e');
+    }
+    return null;
+  }
+  
+  static Future<void> saveCachedOrders(List<Map<String, dynamic>> orders) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cachedOrdersKey, jsonEncode(orders));
+  }
+  
+  static Future<List<Map<String, dynamic>>?> loadCachedOrders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_cachedOrdersKey);
+    if (raw == null) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[CACHE] Error loading cached orders: $e');
+    }
+    return null;
+  }
+  
+  static Future<void> saveCachedClosedPositions(List<Map<String, dynamic>> closedPositions) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cachedClosedPositionsKey, jsonEncode(closedPositions));
+  }
+  
+  static Future<List<Map<String, dynamic>>?> loadCachedClosedPositions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_cachedClosedPositionsKey);
+    if (raw == null) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[CACHE] Error loading cached closed positions: $e');
+    }
+    return null;
   }
 }
 

@@ -934,7 +934,18 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       final prefs = await SharedPreferences.getInstance();
       final vaultKey = 'vault_for_${address}_0';
       await prefs.remove(vaultKey);
+      
+      // Clear wallet address from account index storage
+      await prefs.remove('wallet_address_for_0');
+      debugPrint('[LOGOUT] Cleared wallet address from account index');
     }
+    
+    // Clear cached data
+    await LocalStore.saveCachedBalance('');
+    await LocalStore.saveCachedPositions([]);
+    await LocalStore.saveCachedOrders([]);
+    await LocalStore.saveCachedClosedPositions([]);
+    debugPrint('[LOGOUT] Cleared all cached data');
     
     // Clear all state including connection-related state
     if (mounted) {
@@ -943,12 +954,16 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         _cachedWalletAddress = null;
         _balances = '';
         _positions = [];
+        _orders = [];
+        _closedPositions = [];
         _selectedTabIndex = 0;
         _checkingState = false;
         _onboarding = false;
         _autoIssuing = false;
         _loading = false;
         _loadingPositions = false;
+        _loadingOrders = false;
+        _loadingClosedPositions = false;
         _lastWcUri = null;
       });
     }
@@ -956,10 +971,10 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     // Reset last connected address
     _lastConnectedAddress = null;
     
-    // Update portfolio state provider
+    // Update portfolio state provider IMMEDIATELY to clear wallet address from app bar
     ref.read(_portfolioStateProvider.notifier).updateState(null, false);
     
-    debugPrint('[LOGOUT] Logout complete');
+    debugPrint('[LOGOUT] Logout complete - wallet address cleared');
   }
 
   // Public wrapper methods for app bar menu
@@ -980,8 +995,15 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Future<void> _fetchBalances({bool silent = false}) async {
+    // Load from cache first for instant UI
+    final cachedBalance = await LocalStore.loadCachedBalance();
+    if (cachedBalance != null && mounted) {
+      debugPrint('[BALANCES] Loading from cache');
+      setState(() => _balances = cachedBalance);
+    }
+    
     if (!silent) {
-    setState(() => _loading = true);
+      setState(() => _loading = true);
     }
     try {
       // Try to get wallet address from connected wallet first
@@ -1023,8 +1045,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       
       // Use direct Extended API (faster, no backend dependency)
       final extendedClient = ExtendedClient();
-      debugPrint('[BALANCES] Fetching balances directly from Extended API for $address');
-      debugPrint('[BALANCES] Using API key: ${apiKey.substring(0, 8)}...');
+      debugPrint('[BALANCES] Fetching fresh balances from Extended API');
       final res = await extendedClient.getBalances(apiKey);
       
       // Format balance response nicely
@@ -1046,11 +1067,21 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           balanceStr.writeln('Status: ${accountInfo['status'] ?? 'N/A'}');
         }
         
-        setState(() => _balances = balanceStr.toString());
+        final balanceString = balanceStr.toString();
+        
+        // Update cache and UI
+        await LocalStore.saveCachedBalance(balanceString);
+        if (mounted) {
+          setState(() => _balances = balanceString);
+        }
       } else {
-        setState(() => _balances = 'Balance: 0\nEquity: 0\nAvailable: 0');
+        final emptyBalance = 'Balance: 0\nEquity: 0\nAvailable: 0';
+        await LocalStore.saveCachedBalance(emptyBalance);
+        if (mounted) {
+          setState(() => _balances = emptyBalance);
+        }
       }
-      debugPrint('[BALANCES] Success');
+      debugPrint('[BALANCES] Success - cache updated');
     } catch (e) {
       debugPrint('[BALANCES] Error: $e');
       if (!mounted || silent) return;
@@ -1110,6 +1141,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Future<void> _fetchPositions({bool silent = false}) async {
+    // Load from cache first for instant UI
+    final cachedPositions = await LocalStore.loadCachedPositions();
+    if (cachedPositions != null && cachedPositions.isNotEmpty && mounted) {
+      debugPrint('[POSITIONS] Loading ${cachedPositions.length} positions from cache');
+      setState(() => _positions = cachedPositions);
+    }
+    
     if (!silent) {
       setState(() => _loadingPositions = true);
     }
@@ -1125,9 +1163,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         return;
       }
       
-      // Fetch positions from Extended API
+      // Fetch fresh positions from Extended API
       final extendedClient = ExtendedClient();
-      debugPrint('[POSITIONS] Fetching positions from Extended API');
+      debugPrint('[POSITIONS] Fetching fresh positions from Extended API');
       final res = await extendedClient.getPositions(apiKey);
       
       // Parse positions
@@ -1135,14 +1173,19 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       
       if (data is List) {
         final positions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
-        debugPrint('[POSITIONS] Found ${positions.length} positions');
+        debugPrint('[POSITIONS] Found ${positions.length} fresh positions');
+        
+        // Update cache and UI
+        await LocalStore.saveCachedPositions(positions);
         if (mounted) {
           setState(() => _positions = positions);
         }
       } else {
         debugPrint('[POSITIONS] No positions data (data is not a List)');
+        final emptyList = <Map<String, dynamic>>[];
+        await LocalStore.saveCachedPositions(emptyList);
         if (mounted) {
-          setState(() => _positions = []);
+          setState(() => _positions = emptyList);
         }
       }
     } catch (e) {
@@ -1175,6 +1218,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Future<void> _fetchClosedPositions({bool silent = false}) async {
+    // Load from cache first for instant UI
+    final cachedClosedPositions = await LocalStore.loadCachedClosedPositions();
+    if (cachedClosedPositions != null && cachedClosedPositions.isNotEmpty && mounted) {
+      debugPrint('[REALIZED] Loading ${cachedClosedPositions.length} closed positions from cache');
+      setState(() => _closedPositions = cachedClosedPositions);
+    }
+    
     if (!silent) {
       setState(() => _loadingClosedPositions = true);
     }
@@ -1190,9 +1240,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         return;
       }
       
-      // Fetch closed positions directly from Extended API
+      // Fetch fresh closed positions from Extended API
       final extendedClient = ExtendedClient();
-      debugPrint('[REALIZED] Fetching closed positions from Extended API');
+      debugPrint('[REALIZED] Fetching fresh closed positions from Extended API');
       final res = await extendedClient.getPositionsHistory(apiKey);
       
       // Parse closed positions
@@ -1200,14 +1250,19 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       
       if (data is List) {
         final closedPositions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
-        debugPrint('[REALIZED] Found ${closedPositions.length} closed positions');
+        debugPrint('[REALIZED] Found ${closedPositions.length} fresh closed positions');
+        
+        // Update cache and UI
+        await LocalStore.saveCachedClosedPositions(closedPositions);
         if (mounted) {
           setState(() => _closedPositions = closedPositions);
         }
       } else {
         debugPrint('[REALIZED] No closed positions data (data is not a List)');
+        final emptyList = <Map<String, dynamic>>[];
+        await LocalStore.saveCachedClosedPositions(emptyList);
         if (mounted) {
-          setState(() => _closedPositions = []);
+          setState(() => _closedPositions = emptyList);
         }
       }
     } catch (e) {
@@ -1241,6 +1296,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Future<void> _fetchOrders({bool silent = false}) async {
+    // Load from cache first for instant UI
+    final cachedOrders = await LocalStore.loadCachedOrders();
+    if (cachedOrders != null && mounted) {
+      debugPrint('[ORDERS] Loading ${cachedOrders.length} orders from cache');
+      setState(() => _orders = cachedOrders);
+    }
+    
     if (!silent) {
       setState(() => _loadingOrders = true);
     }
@@ -1256,9 +1318,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         return;
       }
       
-      // Fetch orders directly from Extended API
+      // Fetch fresh orders from Extended API
       final extendedClient = ExtendedClient();
-      debugPrint('[ORDERS] Fetching orders from Extended API');
+      debugPrint('[ORDERS] Fetching fresh orders from Extended API');
       final res = await extendedClient.getOrders(apiKey);
       
       // Parse orders
@@ -1266,14 +1328,19 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
       
       if (data is List) {
         final orders = data.map((o) => Map<String, dynamic>.from(o as Map)).toList();
-        debugPrint('[ORDERS] Found ${orders.length} orders');
+        debugPrint('[ORDERS] Found ${orders.length} fresh orders');
+        
+        // Update cache and UI
+        await LocalStore.saveCachedOrders(orders);
         if (mounted) {
           setState(() => _orders = orders);
         }
       } else {
         debugPrint('[ORDERS] No orders data (data is not a List)');
+        final emptyList = <Map<String, dynamic>>[];
+        await LocalStore.saveCachedOrders(emptyList);
         if (mounted) {
-          setState(() => _orders = []);
+          setState(() => _orders = emptyList);
         }
       }
     } catch (e) {
@@ -2947,91 +3014,207 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   @override
   void initState() {
     super.initState();
-    // Ensure WC core is initialized and check for existing connection
+    final startTime = DateTime.now();
+    debugPrint('[PORTFOLIO_INIT] Starting initState');
+    
+    // STEP 1: Load cached API key state IMMEDIATELY to prevent UI glitch
+    // This must happen before first build to avoid showing "Connect Wallet" button
     Future.microtask(() async {
-      await ref.read(walletServiceProvider).init();
-      
-      // Load cached API key FIRST to prevent flickering
-      await _loadCachedApiKeyIfAny();
-      
-      // Now safe to stop showing loading state
-      if (mounted) {
-        setState(() => _checkingState = false);
-      }
-      
-      // Fetch referral code from backend on first app start (if not already stored)
-      final storedRefCode = await LocalStore.loadReferralCode();
-      if (storedRefCode == null || storedRefCode.isEmpty) {
-        try {
-          final api = BackendClient();
-          final refResponse = await api.getReferralCode();
-          final refCode = refResponse['referral_code'] as String? ?? '';
-          if (refCode.isNotEmpty) {
-            await LocalStore.saveReferralCode(refCode);
-            debugPrint('[INIT] Fetched and saved referral code: $refCode');
-          }
-        } catch (e) {
-          debugPrint('[INIT] Failed to fetch referral code: $e');
-        }
-      }
-      
-      // Auto-load balances if API key exists (even without wallet connection)
+      // Load API key state FIRST (before checking cached data)
       final stored = await LocalStore.loadApiKeyForAccount(0);
-      if (stored['walletAddress'] != null && stored['apiKey'] != null) {
-        debugPrint('[INIT] API key found, auto-loading balances and positions in background');
-        try {
-          await _fetchBalances(silent: true);
-          await _fetchPositions(silent: true);
-        } catch (e) {
-          debugPrint('[INIT] Failed to auto-load data: $e');
-          // If balance fetch fails, show error and require reconnection
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Error, try to login again'),
-                duration: Duration(seconds: 3),
-              ),
-            );
-            // Disconnect wallet if connected to force reconnection
-            final svc = ref.read(walletServiceProvider);
-            if (svc.isConnected) {
-              await svc.disconnect();
+      final hasApiKey = stored['walletAddress'] != null && stored['apiKey'] != null;
+      
+      if (hasApiKey && mounted) {
+        // Set API key state immediately AND stop checking to prevent glitch
+        setState(() {
+          _cachedApiKey = stored['apiKey'];
+          _cachedWalletAddress = stored['walletAddress'];
+          _checkingState = false; // Stop checking immediately - we have API key!
+        });
+        
+        // Update portfolio state provider IMMEDIATELY (synchronously) so app bar shows correct state
+        // Do this in the same microtask to prevent any glitch
+        ref.read(_portfolioStateProvider.notifier).updateState(
+          stored['walletAddress']!,
+          true,
+        );
+        
+        debugPrint('[PORTFOLIO_INIT] API key state loaded - preventing UI glitch');
+      }
+      
+      // STEP 2: Load cached data
+      if (hasApiKey) {
+        final cachedData = await Future.wait([
+          LocalStore.loadCachedBalance(),
+          LocalStore.loadCachedPositions(),
+          LocalStore.loadCachedOrders(),
+          LocalStore.loadCachedClosedPositions(),
+        ]);
+        
+        // Check if we have ANY cached data
+        final hasCachedBalance = cachedData[0] != null && (cachedData[0] as String).isNotEmpty;
+        final hasCachedPositions = cachedData[1] != null && (cachedData[1] as List).isNotEmpty;
+        final hasCachedOrders = cachedData[2] != null && (cachedData[2] as List).isNotEmpty;
+        final hasCachedClosedPositions = cachedData[3] != null && (cachedData[3] as List).isNotEmpty;
+        final hasAnyCachedData = hasCachedBalance || hasCachedPositions || hasCachedOrders || hasCachedClosedPositions;
+        
+        if (hasAnyCachedData && mounted) {
+          // We have cached data - show UI immediately WITHOUT loading spinner
+          setState(() {
+            _checkingState = false;
+            // Update UI with cached data
+            if (hasCachedBalance) {
+              _balances = cachedData[0] as String;
             }
-          }
-        }
-      }
-      
-      // Check if wallet is already connected (e.g., app restarted with existing session)
-      final svc = ref.read(walletServiceProvider);
-      if (svc.isConnected && svc.address != null) {
-        debugPrint('[INIT] Wallet already connected on app start, checking auto-onboard');
-        await _checkAndAutoOnboard(svc.address!);
-      }
-      
-      // Also listen for future connection changes
-      ref.listenManual(walletServiceProvider, (previous, next) {
-        // Only trigger if wallet just connected (wasn't connected before, now is)
-        final wasConnected = previous?.isConnected ?? false;
-        final isNowConnected = next.isConnected && next.address != null;
-        if (!wasConnected && isNowConnected) {
-          debugPrint('[INIT] Wallet connected via listener, checking auto-onboard');
-          // Use a small delay to ensure widget is mounted
-          Future.microtask(() {
-            if (mounted) {
-              _checkAndAutoOnboard(next.address!);
+            if (hasCachedPositions) {
+              _positions = (cachedData[1] as List).cast<Map<String, dynamic>>();
+            }
+            if (hasCachedOrders) {
+              _orders = (cachedData[2] as List).cast<Map<String, dynamic>>();
+            }
+            if (hasCachedClosedPositions) {
+              _closedPositions = (cachedData[3] as List).cast<Map<String, dynamic>>();
             }
           });
+          
+          debugPrint('[PORTFOLIO_INIT] Cached data found - UI shown instantly (no loading spinner)');
+          
+          // Fetch fresh data in background (silent, non-blocking)
+          Future.microtask(() async {
+            debugPrint('[PORTFOLIO_INIT] Fetching fresh data in background');
+            try {
+              await Future.wait([
+                _fetchBalances(silent: true),
+                _fetchPositions(silent: true),
+                _fetchOrders(silent: true),
+                _fetchClosedPositions(silent: true),
+              ]);
+            } catch (e) {
+              debugPrint('[PORTFOLIO_INIT] Failed to fetch fresh data: $e (using cached data)');
+            }
+          });
+          
+          return; // Skip WalletService check - we have everything we need
         }
-      });
+      }
+      
+      // No cached data or no API key - show loading state while we check
+      if (mounted) {
+        setState(() => _checkingState = true);
+      }
+      
+      // Load cached data (might be empty, but still try)
+      final cachedData = await Future.wait([
+        LocalStore.loadCachedBalance(),
+        LocalStore.loadCachedPositions(),
+        LocalStore.loadCachedOrders(),
+        LocalStore.loadCachedClosedPositions(),
+      ]);
+      
+      if (mounted) {
+        // Update UI with any cached data we found
+        setState(() {
+          if (cachedData[0] != null) {
+            _balances = cachedData[0] as String;
+          }
+          if (cachedData[1] != null && cachedData[1] is List) {
+            _positions = (cachedData[1] as List).cast<Map<String, dynamic>>();
+          }
+          if (cachedData[2] != null && cachedData[2] is List) {
+            _orders = (cachedData[2] as List).cast<Map<String, dynamic>>();
+          }
+          if (cachedData[3] != null && cachedData[3] is List) {
+            _closedPositions = (cachedData[3] as List).cast<Map<String, dynamic>>();
+          }
+          // Hide loading state
+          _checkingState = false;
+        });
+      }
+      
+      // Fetch fresh data
+      if (hasApiKey) {
+        Future.microtask(() async {
+          try {
+            await Future.wait([
+              _fetchBalances(silent: true),
+              _fetchPositions(silent: true),
+              _fetchOrders(silent: true),
+              _fetchClosedPositions(silent: true),
+            ]);
+          } catch (e) {
+            debugPrint('[PORTFOLIO_INIT] Failed to fetch fresh data: $e');
+          }
+        });
+      }
     });
+    
+    // STEP 4: Skip WalletService entirely if we have cached credentials!
+    // WalletService is ONLY needed for:
+    // - Connecting NEW wallets (no API key yet)
+    // - Signing onboarding transactions
+    // 
+    // If we have cached API key + Stark keys → NO WalletService needed! ✅
+    // WalletService will auto-init ONLY when user clicks "Connect Wallet" button
+    
+    // Only check for WalletConnect session if we DON'T have cached credentials
+    // (user might want to connect a new wallet)
+    Future.microtask(() async {
+      final stored = await LocalStore.loadApiKeyForAccount(0);
+      final hasCachedCredentials = stored['walletAddress'] != null && stored['apiKey'] != null;
+      
+      if (hasCachedCredentials) {
+        debugPrint('[PORTFOLIO_INIT] Cached credentials found - skipping WalletService init entirely');
+        // User already has credentials - no need for WalletConnect!
+        // WalletService will only init when user explicitly clicks "Connect Wallet"
+        return;
+      }
+      
+      // Only init WalletService if user has NO cached credentials
+      // (they might want to connect a wallet)
+      debugPrint('[PORTFOLIO_INIT] No cached credentials - checking for WalletConnect session');
+      try {
+        final svc = ref.read(walletServiceProvider);
+        await svc.init();
+        
+        if (svc.isConnected && svc.address != null) {
+          debugPrint('[INIT] Found existing WalletConnect session');
+          await _checkAndAutoOnboard(svc.address!);
+        }
+        
+        // Listen for future connection changes
+        ref.listenManual(walletServiceProvider, (previous, next) {
+          final wasConnected = previous?.isConnected ?? false;
+          final isNowConnected = next.isConnected && next.address != null;
+          if (!wasConnected && isNowConnected) {
+            debugPrint('[INIT] Wallet connected via listener');
+            Future.microtask(() {
+              if (mounted) {
+                _checkAndAutoOnboard(next.address!);
+              }
+            });
+          }
+        });
+      } catch (e) {
+        debugPrint('[INIT] WalletService check skipped: $e');
+      }
+    });
+    
+    debugPrint('[PORTFOLIO_INIT] Init complete - UI visible instantly!');
   }
 
   String? _lastConnectedAddress;
 
   @override
   Widget build(BuildContext context) {
-    // Show loading state while checking cached data
-    if (_checkingState) {
+    // Only show loading if:
+    // 1. We're checking state AND
+    // 2. We have NO data in UI (no balances, positions, orders, or closed positions)
+    final hasDataInUI = _balances.isNotEmpty || 
+                        _positions.isNotEmpty || 
+                        _orders.isNotEmpty || 
+                        _closedPositions.isNotEmpty;
+    
+    if (_checkingState && !hasDataInUI) {
       return const Center(
         child: CircularProgressIndicator(),
       );
