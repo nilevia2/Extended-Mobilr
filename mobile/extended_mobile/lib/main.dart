@@ -659,7 +659,10 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   bool _checkingState = true; // To prevent flickering while loading cached data
   List<Map<String, dynamic>> _positions = [];
   bool _loadingPositions = false;
+  List<Map<String, dynamic>> _closedPositions = [];
+  bool _loadingClosedPositions = false;
   int _selectedTabIndex = 0; // 0: Position, 1: Orders, 2: Realize
+  String _selectedTimeRange = '1 Week'; // Time filter for realized PNL
 
   Future<void> _connectWallet() async {
     debugPrint('[CONNECT] Starting wallet connection...');
@@ -1169,6 +1172,72 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     }
   }
 
+  Future<void> _fetchClosedPositions({bool silent = false}) async {
+    if (!silent) {
+      setState(() => _loadingClosedPositions = true);
+    }
+    try {
+      // Get API key
+      final stored = await LocalStore.loadApiKeyForAccount(0);
+      final apiKey = stored['apiKey'] as String?;
+      
+      if (apiKey == null || apiKey.isEmpty) {
+        debugPrint('[REALIZED] No API key found');
+        if (!mounted || silent) return;
+        setState(() => _closedPositions = []);
+        return;
+      }
+      
+      // Fetch closed positions directly from Extended API
+      final extendedClient = ExtendedClient();
+      debugPrint('[REALIZED] Fetching closed positions from Extended API');
+      final res = await extendedClient.getPositionsHistory(apiKey);
+      
+      // Parse closed positions
+      final data = res['data'];
+      
+      if (data is List) {
+        final closedPositions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
+        debugPrint('[REALIZED] Found ${closedPositions.length} closed positions');
+        if (mounted) {
+          setState(() => _closedPositions = closedPositions);
+        }
+      } else {
+        debugPrint('[REALIZED] No closed positions data (data is not a List)');
+        if (mounted) {
+          setState(() => _closedPositions = []);
+        }
+      }
+    } catch (e) {
+      debugPrint('[REALIZED] Error: $e');
+      if (!mounted || silent) return;
+      
+      final msg = e.toString();
+      final is451Error = msg.contains('451') || msg.contains('Unavailable For Legal Reasons');
+      
+      if (is451Error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Extended Exchange is not available in your region. Use VPN instead.'),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to load realized PNL: $e'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted && !silent) {
+        setState(() => _loadingClosedPositions = false);
+      }
+    }
+  }
+
   Widget _buildTabContent() {
     switch (_selectedTabIndex) {
       case 0: // Position
@@ -1398,7 +1467,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           // Row 2: Entry, Mark, Liq
           Row(
             children: [
-              Expanded(
+          Expanded(
                 child: _buildPositionDetail('Entry', '\$$entryPrice'),
               ),
               Expanded(
@@ -1491,25 +1560,606 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Widget _buildRealizeTab() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.history,
-            size: 48,
-            color: _colorTextSecondary.withOpacity(0.5),
+    if (_loadingClosedPositions) {
+      return const Center(
+        child: CircularProgressIndicator(color: _colorGreenPrimary),
+      );
+    }
+
+    if (_closedPositions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.history,
+              size: 48,
+              color: _colorTextSecondary.withOpacity(0.5),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No closed positions',
+              style: TextStyle(
+                color: Color(0xFF808080),
+                fontSize: 15,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Your realized PNL will appear here',
+              style: TextStyle(
+                color: Color(0xFF666666),
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Filter positions based on time range
+    final filteredPositions = _filterPositionsByTimeRange(_closedPositions, _selectedTimeRange);
+
+    return Column(
+      children: [
+        // Time range filter
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: _buildTimeRangeDropdown(),
+              ),
+            ],
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Realize tab - Coming soon',
+        ),
+        // List of positions
+        Expanded(
+          child: filteredPositions.isEmpty
+              ? const Center(
+                  child: Text(
+                    'No positions in this time range',
+                    style: TextStyle(
+                      color: Color(0xFF808080),
+                      fontSize: 14,
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: filteredPositions.length,
+                  itemBuilder: (context, index) => _buildClosedPositionCard(filteredPositions[index]),
+                ),
+        ),
+      ],
+    );
+  }
+
+  List<Map<String, dynamic>> _filterPositionsByTimeRange(List<Map<String, dynamic>> positions, String timeRange) {
+    final now = DateTime.now();
+    DateTime cutoffDate;
+
+    switch (timeRange) {
+      case '1 Day':
+        cutoffDate = now.subtract(const Duration(days: 1));
+        break;
+      case '1 Week':
+        cutoffDate = now.subtract(const Duration(days: 7));
+        break;
+      case '1 Month':
+        cutoffDate = now.subtract(const Duration(days: 30));
+        break;
+      case '3 Months':
+        cutoffDate = now.subtract(const Duration(days: 90));
+        break;
+      case 'All Time':
+        return positions; // Return all positions
+      default:
+        cutoffDate = now.subtract(const Duration(days: 7));
+    }
+
+    return positions.where((position) {
+      final closedTime = position['closedTime'];
+      if (closedTime == null) {
+        // If not closed, use created time
+        final createdTime = position['createdTime'] ?? 0;
+        final date = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+        return date.isAfter(cutoffDate);
+      } else {
+        final date = DateTime.fromMillisecondsSinceEpoch(closedTime as int);
+        return date.isAfter(cutoffDate);
+      }
+    }).toList();
+  }
+
+  Widget _buildTimeRangeDropdown() {
+    return PopupMenuButton<String>(
+      onSelected: (value) {
+        setState(() {
+          _selectedTimeRange = value;
+        });
+      },
+      itemBuilder: (context) => [
+        _buildTimeRangeMenuItem('1 Day'),
+        _buildTimeRangeMenuItem('1 Week'),
+        _buildTimeRangeMenuItem('1 Month'),
+        _buildTimeRangeMenuItem('3 Months'),
+        _buildTimeRangeMenuItem('All Time'),
+      ],
+      color: _colorBgElevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      offset: const Offset(0, 48),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: _colorBgElevated,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              _selectedTimeRange,
+              style: const TextStyle(
+                color: _colorTextMain,
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const Icon(
+              Icons.arrow_drop_down,
+              color: _colorTextSecondary,
+              size: 24,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  PopupMenuItem<String> _buildTimeRangeMenuItem(String value) {
+    final isSelected = _selectedTimeRange == value;
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            value,
             style: TextStyle(
-              color: Color(0xFF808080),
+              color: isSelected ? _colorGreenPrimary : _colorTextMain,
               fontSize: 15,
+              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
             ),
           ),
+          if (isSelected)
+            const Icon(
+              Icons.check,
+              color: _colorGreenPrimary,
+              size: 20,
+            ),
         ],
       ),
+    );
+  }
+
+  Widget _buildClosedPositionCard(Map<String, dynamic> position) {
+    final market = position['market'] ?? '';
+    final side = (position['side'] ?? '').toString().toLowerCase();
+    final isLong = side == 'long';
+    final sideColor = isLong ? _colorGain : _colorLoss;
+    final sideText = side == 'long' ? 'Long' : 'Short';
+    
+    // Realized PNL
+    final realisedPnl = double.tryParse((position['realisedPnl'] ?? '0').toString()) ?? 0.0;
+    final isProfitable = realisedPnl >= 0;
+    final pnlColor = isProfitable ? _colorGain : _colorLoss;
+    final pnlSign = isProfitable ? '+' : '-';
+    final pnlValue = realisedPnl.abs().toStringAsFixed(2);
+    
+    // Position details
+    final size = _formatPrice(position['size']);
+    final openPrice = _formatPrice(position['openPrice']);
+    final exitPrice = position['exitPrice'];
+    final exitPriceStr = exitPrice != null ? _formatPrice(exitPrice) : null;
+    
+    // Format timestamp
+    final createdTime = position['createdTime'] ?? 0;
+    final openDate = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+    final monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final formattedDate = '${monthNames[openDate.month]} ${openDate.day}, ${openDate.year} · ${openDate.hour.toString().padLeft(2, '0')}:${openDate.minute.toString().padLeft(2, '0')}:${openDate.second.toString().padLeft(2, '0')}';
+
+    return InkWell(
+      onTap: () => _showClosedPositionDetails(position),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: _colorBgElevated,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header: Size, Market, Date, and Side badge
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$size · $market',
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        formattedDate,
+                        style: const TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: sideColor.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    sideText,
+                    style: TextStyle(
+                      color: sideColor,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            
+            const SizedBox(height: 20),
+            
+            // Entry Price, Exit Price, Realized PNL
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Entry Price',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '\$$openPrice',
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Exit Price',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        exitPriceStr != null ? '\$$exitPriceStr' : '—',
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Realized PnL',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '$pnlSign\$$pnlValue',
+                        style: TextStyle(
+                          color: pnlColor,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showClosedPositionDetails(Map<String, dynamic> position) {
+    final market = position['market'] ?? '';
+    final side = (position['side'] ?? '').toString().toLowerCase();
+    final isLong = side == 'long';
+    final sideColor = isLong ? _colorGain : _colorLoss;
+    final sideText = side == 'long' ? 'Long' : 'Short';
+    
+    // Realized PNL
+    final realisedPnl = double.tryParse((position['realisedPnl'] ?? '0').toString()) ?? 0.0;
+    final isProfitable = realisedPnl >= 0;
+    final pnlColor = isProfitable ? _colorGain : _colorLoss;
+    final pnlSign = isProfitable ? '+' : '-';
+    final pnlValue = realisedPnl.abs().toStringAsFixed(2);
+    
+    // Position details
+    final size = _formatPrice(position['size']);
+    final openPrice = _formatPrice(position['openPrice']);
+    final exitPrice = position['exitPrice'];
+    final exitPriceStr = exitPrice != null ? _formatPrice(exitPrice) : null;
+    final leverage = _formatPrice(position['leverage']);
+    final exitType = position['exitType'] ?? '';
+    
+    // PNL Breakdown
+    final breakdown = position['realisedPnlBreakdown'] as Map<String, dynamic>?;
+    final tradePnl = breakdown != null ? double.tryParse(breakdown['tradePnl'].toString()) ?? 0.0 : 0.0;
+    final fundingFees = breakdown != null ? double.tryParse(breakdown['fundingFees'].toString()) ?? 0.0 : 0.0;
+    final openFees = breakdown != null ? double.tryParse(breakdown['openFees'].toString()) ?? 0.0 : 0.0;
+    final closeFees = breakdown != null ? double.tryParse(breakdown['closeFees'].toString()) ?? 0.0 : 0.0;
+    
+    // Format timestamps
+    final createdTime = position['createdTime'] ?? 0;
+    final openDate = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+    final monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final openDateStr = '${monthNames[openDate.month]} ${openDate.day}, ${openDate.year} ${openDate.hour.toString().padLeft(2, '0')}:${openDate.minute.toString().padLeft(2, '0')}';
+    
+    String? closeDateStr;
+    final closedTime = position['closedTime'];
+    if (closedTime != null) {
+      final closeDate = DateTime.fromMillisecondsSinceEpoch(closedTime as int);
+      closeDateStr = '${monthNames[closeDate.month]} ${closeDate.day}, ${closeDate.year} ${closeDate.hour.toString().padLeft(2, '0')}:${closeDate.minute.toString().padLeft(2, '0')}';
+    }
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _colorBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      isScrollControlled: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => SingleChildScrollView(
+          controller: scrollController,
+          child: Container(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+            // Header
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      market,
+                      style: const TextStyle(
+                        color: _colorTextMain,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Size: $size',
+                      style: const TextStyle(
+                        color: _colorTextSecondary,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: sideColor.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        sideText,
+                        style: TextStyle(
+                          color: sideColor,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (exitType == 'LIQUIDATION') ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Text(
+                          'LIQUIDATED',
+                          style: TextStyle(
+                            color: Colors.orange,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+            
+            const SizedBox(height: 24),
+            
+            // Realized PNL - Large display
+            Center(
+              child: Column(
+                children: [
+                  const Text(
+                    'Realized PnL',
+                    style: TextStyle(
+                      color: _colorTextSecondary,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '$pnlSign\$$pnlValue',
+                    style: TextStyle(
+                      color: pnlColor,
+                      fontSize: 32,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            
+            const SizedBox(height: 24),
+            const Divider(color: Color(0xFF2A2A2A)),
+            const SizedBox(height: 16),
+            
+            // Position Details
+            _buildDetailRow('Leverage', '${leverage}x'),
+            const SizedBox(height: 12),
+            _buildDetailRow('Entry Price', '\$$openPrice'),
+            const SizedBox(height: 12),
+            _buildDetailRow('Exit Price', exitPriceStr != null ? '\$$exitPriceStr' : 'Still Open'),
+            const SizedBox(height: 12),
+            _buildDetailRow('Opened', openDateStr),
+            if (closeDateStr != null) ...[
+              const SizedBox(height: 12),
+              _buildDetailRow('Closed', closeDateStr),
+            ],
+            
+            const SizedBox(height: 24),
+            const Divider(color: Color(0xFF2A2A2A)),
+            const SizedBox(height: 16),
+            
+            // PNL Breakdown
+            const Text(
+              'PNL Breakdown',
+              style: TextStyle(
+                color: _colorTextMain,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 16),
+            _buildPnlBreakdownRow('Trade PnL', tradePnl),
+            const SizedBox(height: 12),
+            _buildPnlBreakdownRow('Funding Fees', fundingFees),
+            const SizedBox(height: 12),
+            _buildPnlBreakdownRow('Open Fees', openFees),
+            const SizedBox(height: 12),
+            _buildPnlBreakdownRow('Close Fees', closeFees),
+            
+            const SizedBox(height: 24),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: _colorTextSecondary,
+            fontSize: 14,
+          ),
+        ),
+        Text(
+          value,
+          style: const TextStyle(
+            color: _colorTextMain,
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPnlBreakdownRow(String label, double value) {
+    final isPositive = value >= 0;
+    final color = isPositive ? _colorGain : _colorLoss;
+    final sign = isPositive ? '+' : '';
+    final displayValue = '$sign\$${value.abs().toStringAsFixed(2)}';
+    
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: _colorTextSecondary,
+            fontSize: 14,
+          ),
+        ),
+        Text(
+          displayValue,
+          style: TextStyle(
+            color: color,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1791,9 +2441,15 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
               child: _PortfolioTabs(
                 selectedIndex: _selectedTabIndex,
                 onTabSelected: (index) {
-                  setState(() => _selectedTabIndex = index);
+                  debugPrint('[TABS] Selected tab index: $index');
+                  setState(() {
+                    _selectedTabIndex = index;
+                  });
+                  // Fetch data after state is set
                   if (index == 0 && _positions.isEmpty) {
                     _fetchPositions();
+                  } else if (index == 2 && _closedPositions.isEmpty) {
+                    _fetchClosedPositions();
                   }
                 },
               ),
@@ -2585,7 +3241,7 @@ class _TabsHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) {
-    return false;
+    return true; // Always rebuild to reflect tab selection changes
   }
 }
 

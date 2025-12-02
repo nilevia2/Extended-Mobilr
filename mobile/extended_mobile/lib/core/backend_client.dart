@@ -107,6 +107,32 @@ class BackendClient {
     return Map<String, dynamic>.from(res.data);
   }
 
+  Future<Map<String, dynamic>> getTrades({
+    required String walletAddress,
+    required int accountIndex,
+    String? market,
+  }) async {
+    final res = await _dio.get('/trades', queryParameters: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+      if (market != null) 'market': market,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
+  Future<Map<String, dynamic>> getPositionsHistory({
+    required String walletAddress,
+    required int accountIndex,
+    String? market,
+  }) async {
+    final res = await _dio.get('/positions/history', queryParameters: {
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+      if (market != null) 'market': market,
+    });
+    return Map<String, dynamic>.from(res.data);
+  }
+
   Future<Map<String, dynamic>> createAndPlaceOrder({
     required String walletAddress,
     required int accountIndex,

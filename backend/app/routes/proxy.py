@@ -54,6 +54,22 @@ def get_orders(wallet_address: str, account_index: int, status: Optional[str] = 
     return client.get_private(api_key, "/user/orders", params=params)
 
 
+@router.get("/trades")
+def get_trades(wallet_address: str, account_index: int, market: Optional[str] = Query(None)):
+    api_key = _get_api_key(wallet_address, account_index)
+    client = ExtendedRESTClient(get_endpoint_config())
+    params = {"market": market} if market else None
+    return client.get_private(api_key, "/user/trades", params=params)
+
+
+@router.get("/positions/history")
+def get_positions_history(wallet_address: str, account_index: int, market: Optional[str] = Query(None)):
+    api_key = _get_api_key(wallet_address, account_index)
+    client = ExtendedRESTClient(get_endpoint_config())
+    params = {"market": market} if market else None
+    return client.get_private(api_key, "/user/positions/history", params=params)
+
+
 class ReferralRequest(BaseModel):
     wallet_address: str
     account_index: int
