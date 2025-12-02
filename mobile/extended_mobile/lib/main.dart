@@ -661,6 +661,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   bool _loadingPositions = false;
   List<Map<String, dynamic>> _closedPositions = [];
   bool _loadingClosedPositions = false;
+  List<Map<String, dynamic>> _orders = [];
+  bool _loadingOrders = false;
   int _selectedTabIndex = 0; // 0: Position, 1: Orders, 2: Realize
   String _selectedTimeRange = '1 Week'; // Time filter for realized PNL
 
@@ -1238,6 +1240,72 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     }
   }
 
+  Future<void> _fetchOrders({bool silent = false}) async {
+    if (!silent) {
+      setState(() => _loadingOrders = true);
+    }
+    try {
+      // Get API key
+      final stored = await LocalStore.loadApiKeyForAccount(0);
+      final apiKey = stored['apiKey'] as String?;
+      
+      if (apiKey == null || apiKey.isEmpty) {
+        debugPrint('[ORDERS] No API key found');
+        if (!mounted || silent) return;
+        setState(() => _orders = []);
+        return;
+      }
+      
+      // Fetch orders directly from Extended API
+      final extendedClient = ExtendedClient();
+      debugPrint('[ORDERS] Fetching orders from Extended API');
+      final res = await extendedClient.getOrders(apiKey);
+      
+      // Parse orders
+      final data = res['data'];
+      
+      if (data is List) {
+        final orders = data.map((o) => Map<String, dynamic>.from(o as Map)).toList();
+        debugPrint('[ORDERS] Found ${orders.length} orders');
+        if (mounted) {
+          setState(() => _orders = orders);
+        }
+      } else {
+        debugPrint('[ORDERS] No orders data (data is not a List)');
+        if (mounted) {
+          setState(() => _orders = []);
+        }
+      }
+    } catch (e) {
+      debugPrint('[ORDERS] Error: $e');
+      if (!mounted || silent) return;
+      
+      final msg = e.toString();
+      final is451Error = msg.contains('451') || msg.contains('Unavailable For Legal Reasons');
+      
+      if (is451Error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Extended Exchange is not available in your region. Use VPN instead.'),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to load orders: $e'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted && !silent) {
+        setState(() => _loadingOrders = false);
+      }
+    }
+  }
+
   Widget _buildTabContent() {
     switch (_selectedTabIndex) {
       case 0: // Position
@@ -1321,9 +1389,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     if (absPrice >= 100) {
       formatted = price.toStringAsFixed(2);
     }
-    // For prices >= $1, show up to 4 decimals (e.g., 12.3456)
+    // For prices >= $1, show 2 decimals (e.g., 12.34, 2.00)
     else if (absPrice >= 1) {
-      formatted = price.toStringAsFixed(4);
+      formatted = price.toStringAsFixed(2);
     }
     // For prices >= $0.0001, show up to 5 decimals (e.g., 0.07760)
     else if (absPrice >= 0.0001) {
@@ -1363,7 +1431,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     final entryPrice = _formatPrice(entryPriceRaw);
     final markPrice = _formatPrice(markPriceRaw);
     final value = _formatPrice(valueRaw);
-    final margin = _formatPrice(marginRaw);
+    
+    // Manual calculation: margin = value / leverage
+    // Real calculation from API: marginRaw (often incorrect)
+    final valueNum = double.tryParse((valueRaw ?? '0').toString()) ?? 0.0;
+    final leverageNum = double.tryParse((leverageRaw ?? '1').toString()) ?? 1.0;
+    final marginCalculated = leverageNum > 0 ? valueNum / leverageNum : valueNum;
+    final margin = marginCalculated.toStringAsFixed(2);
     
     // liquidationPrice can be 0 (no liq price) or null
     final liqPriceValue = liquidationPriceRaw is String 
@@ -1377,23 +1451,30 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         ? '${_formatPrice(leverageRaw)}x'
         : '';
     
-    // Parse PNL to determine color
+    // Get PNL from API, calculate percentage
     final pnlValue = unrealizedPnlRaw is String 
         ? (double.tryParse(unrealizedPnlRaw) ?? 0.0)
         : (unrealizedPnlRaw as num?)?.toDouble() ?? 0.0;
     final unrealizedPnl = pnlValue.toStringAsFixed(2);
     
+    // Manual calculation: PNL percentage = (PNL / margin) * 100
+    final pnlPercent = marginCalculated > 0 ? (pnlValue / marginCalculated * 100) : 0.0;
+    final pnlPercentStr = pnlPercent.toStringAsFixed(2);
+    
     final pnlColor = pnlValue >= 0 ? _colorGreenPrimary : const Color(0xFFFF4D4D);
     final sideColor = side == 'LONG' ? _colorGreenPrimary : const Color(0xFFFF4D4D);
     
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: _colorBgElevated,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF2A2A2A), width: 1),
-      ),
+    return InkWell(
+      onTap: () => _showPositionDetails(position),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: _colorBgElevated,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF2A2A2A), width: 1),
+        ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1479,7 +1560,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
             ],
           ),
           const SizedBox(height: 12),
-          // Unrealized PNL
+          // Unrealized PNL with percentage
           Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -1497,7 +1578,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                   ),
                 ),
                 Text(
-                  '${pnlValue >= 0 ? '+' : ''}\$$unrealizedPnl',
+                  // Manual calculation: $gain / percentage%
+                  '${pnlValue >= 0 ? '+' : ''}\$$unrealizedPnl / ${pnlPercent >= 0 ? '+' : ''}$pnlPercentStr%',
                   style: TextStyle(
                     color: pnlColor,
                     fontSize: 15,
@@ -1509,6 +1591,288 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           ),
         ],
       ),
+      ),
+    );
+  }
+
+  void _showPositionDetails(Map<String, dynamic> position) {
+    final market = position['market'] ?? 'Unknown';
+    final side = (position['side']?.toString() ?? '').toUpperCase();
+    final isLong = side == 'LONG';
+    final sideColor = isLong ? _colorGain : _colorLoss;
+    
+    // Position details - all from API
+    final size = _formatPrice(position['size']);
+    final valueRaw = double.tryParse((position['value'] ?? '0').toString()) ?? 0.0;
+    final value = _formatPrice(position['value']);
+    final markPrice = _formatPrice(position['markPrice']);
+    final entryPrice = _formatPrice(position['openPrice']);
+    final leverageRaw = double.tryParse((position['leverage'] ?? '1').toString()) ?? 1.0;
+    final leverage = _formatPrice(position['leverage']);
+    
+    // Manual calculation: margin = value / leverage
+    // Real calculation from API: position['margin'] (often incorrect)
+    final marginCalculated = leverageRaw > 0 ? valueRaw / leverageRaw : valueRaw;
+    final margin = marginCalculated.toStringAsFixed(2);
+    
+    // Liquidation price
+    final liqPriceRaw = position['liquidationPrice'];
+    final liqPriceValue = liqPriceRaw is String 
+        ? (double.tryParse(liqPriceRaw) ?? 0.0)
+        : (liqPriceRaw as num?)?.toDouble() ?? 0.0;
+    final liquidationPrice = (liqPriceRaw != null && liqPriceValue > 0) 
+        ? _formatPrice(liqPriceRaw) 
+        : null;
+    
+    // PNL from API - formatted for display
+    final unrealisedPnlValue = double.tryParse((position['unrealisedPnl'] ?? '0').toString()) ?? 0.0;
+    final unrealisedPnlMidValue = double.tryParse((position['unrealisedPnlMid'] ?? '0').toString()) ?? 0.0;
+    final realisedPnlValue = double.tryParse((position['realisedPnl'] ?? '0').toString()) ?? 0.0;
+    
+    // Manual calculation: PNL percentage = (PNL / margin) * 100
+    final unrealisedPnlPercent = marginCalculated > 0 ? (unrealisedPnlValue / marginCalculated * 100) : 0.0;
+    final unrealisedPnlMidPercent = marginCalculated > 0 ? (unrealisedPnlMidValue / marginCalculated * 100) : 0.0;
+    final realisedPnlPercent = marginCalculated > 0 ? (realisedPnlValue / marginCalculated * 100) : 0.0;
+    
+    final unrealisedPnlColor = unrealisedPnlValue >= 0 ? _colorGain : _colorLoss;
+    final realisedPnlColor = realisedPnlValue >= 0 ? _colorGain : _colorLoss;
+    
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _colorBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      isScrollControlled: true,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: SingleChildScrollView(
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header with market name and side
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      market,
+                      style: const TextStyle(
+                        color: _colorTextMain,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: sideColor.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                child: Text(
+                        side == 'LONG' ? 'Long' : 'Short',
+                        style: TextStyle(
+                          color: sideColor,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                
+                const SizedBox(height: 16),
+                const Divider(color: Color(0xFF2A2A2A), height: 1),
+                const SizedBox(height: 16),
+                
+                // Position details
+                _buildDetailRow('Value', '\$$value'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Size', '$size ${market.split('-')[0]}'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Mark Price', '\$$markPrice'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Entry Price', '\$$entryPrice'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Liq. Price', liquidationPrice != null ? '\$$liquidationPrice' : '—'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Margin', '\$$margin'),
+                
+                const SizedBox(height: 16),
+                const Divider(color: Color(0xFF2A2A2A), height: 1),
+                const SizedBox(height: 16),
+                
+                // PNL section
+                _buildPnlRowWithPercent('U. PnL (Mark Price)', unrealisedPnlValue, unrealisedPnlPercent, unrealisedPnlColor),
+                const SizedBox(height: 10),
+                _buildPnlRowWithPercent('U. PnL (Mid Price)', unrealisedPnlMidValue != 0.0 ? unrealisedPnlMidValue : unrealisedPnlValue, unrealisedPnlMidValue != 0.0 ? unrealisedPnlMidPercent : unrealisedPnlPercent, unrealisedPnlColor),
+                const SizedBox(height: 10),
+                _buildPnlRowWithPercent('R. PnL', realisedPnlValue, realisedPnlPercent, realisedPnlColor),
+                
+                const SizedBox(height: 16),
+                const Divider(color: Color(0xFF2A2A2A), height: 1),
+                const SizedBox(height: 16),
+                
+                // TP / SL
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'TP / SL',
+                      style: TextStyle(
+                        color: _colorTextSecondary,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2A2A),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        children: const [
+                          Text(
+                            'Add',
+                            style: TextStyle(
+                              color: _colorTextMain,
+                              fontSize: 13,
+                            ),
+                          ),
+                          SizedBox(width: 4),
+                          Icon(Icons.edit, size: 14, color: _colorTextMain),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                
+                const SizedBox(height: 20),
+                
+                // Close buttons
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          // TODO: Implement limit close
+                        },
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xFF2A2A2A)),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: const Text(
+                          'Limit Close',
+                          style: TextStyle(
+                            color: _colorTextMain,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          // TODO: Implement market close
+                        },
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF2A2A2A),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: const Text(
+                          'Market Close',
+                          style: TextStyle(
+                            color: _colorTextMain,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 8),
+                    IconButton(
+                      onPressed: () {
+                        // TODO: Implement share
+                      },
+                      icon: const Icon(Icons.ios_share, color: _colorTextMain),
+                      style: IconButton.styleFrom(
+                        backgroundColor: const Color(0xFF2A2A2A),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPnlRow(String label, double value, Color color) {
+    final sign = value >= 0 ? '+' : '';
+    final formatted = value.abs().toStringAsFixed(2);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: _colorTextSecondary,
+            fontSize: 14,
+          ),
+        ),
+        Text(
+          '$sign\$$formatted',
+          style: TextStyle(
+            color: color,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPnlRowWithPercent(String label, double value, double percent, Color color) {
+    // Manual calculation: $gain / percentage%
+    final sign = value >= 0 ? '+' : '';
+    final signPercent = percent >= 0 ? '+' : '';
+    final formatted = value.abs().toStringAsFixed(2);
+    final formattedPercent = percent.abs().toStringAsFixed(2);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: _colorTextSecondary,
+            fontSize: 14,
+          ),
+        ),
+        Text(
+          '$sign\$$formatted / $signPercent$formattedPercent%',
+          style: TextStyle(
+            color: color,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1537,24 +1901,423 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   }
 
   Widget _buildOrdersTab() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.receipt_long_outlined,
-            size: 48,
-            color: _colorTextSecondary.withOpacity(0.5),
-          ),
+    if (_loadingOrders) {
+      return const Center(
+        child: CircularProgressIndicator(color: _colorGreenPrimary),
+      );
+    }
+
+    if (_orders.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.receipt_long_outlined,
+              size: 48,
+              color: _colorTextSecondary.withOpacity(0.5),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'No open orders',
+              style: TextStyle(
+                color: Color(0xFF808080),
+                fontSize: 15,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Your active orders will appear here',
+              style: TextStyle(
+                color: Color(0xFF666666),
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: _orders.length,
+      itemBuilder: (context, index) => _buildOrderCard(_orders[index]),
+    );
+  }
+
+  Widget _buildOrderCard(Map<String, dynamic> order) {
+    final market = order['market'] ?? '';
+    final type = (order['type'] ?? '').toString();
+    final side = (order['side'] ?? '').toString().toUpperCase();
+    final isBuy = side == 'BUY';
+    final sideColor = isBuy ? _colorGain : _colorLoss;
+    
+    final price = _formatPrice(order['price']);
+    final qty = _formatPrice(order['qty']);
+    final filledQty = _formatPrice(order['filledQty']);
+    
+    // Format timestamp
+    final createdTime = order['createdTime'] ?? 0;
+    final date = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+    final monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final formattedDate = '${monthNames[date.month]} ${date.day}, ${date.year} · ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}:${date.second.toString().padLeft(2, '0')}';
+
+    return InkWell(
+      onTap: () => _showOrderDetails(order),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: _colorBgElevated,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header: Market, Type, Date, and Side badge
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            market,
+                            style: const TextStyle(
+                              color: _colorTextMain,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                ),
+              ),
+                const SizedBox(width: 8),
+                          Text(
+                            type,
+                            style: const TextStyle(
+                              color: _colorTextSecondary,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        formattedDate,
+                        style: const TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: sideColor.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    side,
+                    style: TextStyle(
+                      color: sideColor,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            
+            const SizedBox(height: 20),
+            
+            // Order details
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Order Price',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '\$$price',
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Order Size',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '$qty ${market.split('-')[0]}',
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Filled Size',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        filledQty == '0' ? '—' : filledQty,
+                        style: const TextStyle(
+                          color: _colorTextMain,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showOrderDetails(Map<String, dynamic> order) {
+    final market = order['market'] ?? '';
+    final type = order['type'] ?? '';
+    final side = (order['side'] ?? '').toString().toUpperCase();
+    final status = order['status'] ?? '';
+    final isBuy = side == 'BUY';
+    final sideColor = isBuy ? _colorGain : _colorLoss;
+    
+    final price = _formatPrice(order['price']);
+    final qty = _formatPrice(order['qty']);
+    final filledQty = _formatPrice(order['filledQty']);
+    final cancelledQty = _formatPrice(order['cancelledQty']);
+    final reduceOnly = order['reduceOnly'] ?? false;
+    final postOnly = order['postOnly'] ?? false;
+    final timeInForce = order['timeInForce'] ?? '';
+    
+    // TP/SL
+    final takeProfit = order['takeProfit'] as Map<String, dynamic>?;
+    final stopLoss = order['stopLoss'] as Map<String, dynamic>?;
+    
+    // Timestamps
+    final createdTime = order['createdTime'] ?? 0;
+    final updatedTime = order['updatedTime'] ?? 0;
+    final date = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+    final updatedDate = DateTime.fromMillisecondsSinceEpoch(updatedTime as int);
+    final monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final createdStr = '${monthNames[date.month]} ${date.day}, ${date.year} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+    final updatedStr = '${monthNames[updatedDate.month]} ${updatedDate.day}, ${updatedDate.year} ${updatedDate.hour.toString().padLeft(2, '0')}:${updatedDate.minute.toString().padLeft(2, '0')}';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _colorBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      isScrollControlled: true,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: SingleChildScrollView(
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          market,
+                          style: const TextStyle(
+                            color: _colorTextMain,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Text(
+                              type,
+                              style: const TextStyle(
+                                color: _colorTextSecondary,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            const Text(
+                              '·',
+                              style: TextStyle(
+                                color: _colorTextSecondary,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              status,
+                              style: TextStyle(
+                                color: status == 'NEW' ? _colorGreenPrimary : _colorTextSecondary,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: sideColor.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        side,
+                        style: TextStyle(
+                          color: sideColor,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                
           const SizedBox(height: 16),
-          const Text(
-            'Orders tab - Coming soon',
-            style: TextStyle(
-              color: Color(0xFF808080),
-              fontSize: 15,
+                const Divider(color: Color(0xFF2A2A2A), height: 1),
+                const SizedBox(height: 16),
+                
+                // Order Details
+                _buildDetailRow('Order Type', type),
+                const SizedBox(height: 10),
+                _buildDetailRow('Status', status),
+                if (type != 'MARKET') ...[
+                  const SizedBox(height: 10),
+                  _buildDetailRow('Trigger Price', '—'),
+                ],
+                const SizedBox(height: 10),
+                _buildDetailRow('Order Price', '\$$price'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Order Size', '$qty ${market.split('-')[0]}'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Filled', filledQty == '0' ? '0 / 0%' : '$filledQty ${market.split('-')[0]}'),
+                
+                const SizedBox(height: 16),
+                const Divider(color: Color(0xFF2A2A2A), height: 1),
+                const SizedBox(height: 16),
+                
+                // TP / SL
+                if (takeProfit != null || stopLoss != null) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'TP / SL',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const Text(
+                        'Add',
+                        style: TextStyle(
+                          color: _colorTextSecondary,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (takeProfit != null) ...[
+                    const SizedBox(height: 10),
+                    _buildDetailRow('Take Profit', '\$${_formatPrice(takeProfit['triggerPrice'])}'),
+                  ],
+                  if (stopLoss != null) ...[
+                    const SizedBox(height: 10),
+                    _buildDetailRow('Stop Loss', '\$${_formatPrice(stopLoss['triggerPrice'])}'),
+                  ],
+                  const SizedBox(height: 16),
+                  const Divider(color: Color(0xFF2A2A2A), height: 1),
+            const SizedBox(height: 16),
+          ],
+                
+                // Flags
+                _buildDetailRow('Reduce-Only', reduceOnly ? 'Yes' : 'No'),
+                const SizedBox(height: 10),
+                _buildDetailRow('Updated At', updatedStr),
+                
+                const SizedBox(height: 20),
+                
+                // Cancel button (placeholder)
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      // TODO: Implement cancel order
+                    },
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF2A2A2A),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'Cancel Order',
+                      style: TextStyle(
+                        color: _colorTextMain,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1575,8 +2338,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
               Icons.history,
               size: 48,
               color: _colorTextSecondary.withOpacity(0.5),
-            ),
-            const SizedBox(height: 16),
+          ),
+          const SizedBox(height: 16),
             const Text(
               'No closed positions',
               style: TextStyle(
@@ -1607,7 +2370,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: Row(
             children: [
-              Expanded(
+          Expanded(
                 child: _buildTimeRangeDropdown(),
               ),
             ],
@@ -1691,12 +2454,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         borderRadius: BorderRadius.circular(12),
       ),
       offset: const Offset(0, 48),
-      child: Container(
+            child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: _colorBgElevated,
-          borderRadius: BorderRadius.circular(12),
-        ),
+              decoration: BoxDecoration(
+                color: _colorBgElevated,
+                borderRadius: BorderRadius.circular(12),
+              ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -1752,7 +2515,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     final sideColor = isLong ? _colorGain : _colorLoss;
     final sideText = side == 'long' ? 'Long' : 'Short';
     
-    // Realized PNL
+    // Realized PNL - from API, just formatted for display
     final realisedPnl = double.tryParse((position['realisedPnl'] ?? '0').toString()) ?? 0.0;
     final isProfitable = realisedPnl >= 0;
     final pnlColor = isProfitable ? _colorGain : _colorLoss;
@@ -1792,12 +2555,34 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        '$size · $market',
-                        style: const TextStyle(
-                          color: _colorTextMain,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
+                      RichText(
+                        text: TextSpan(
+                          children: [
+                            TextSpan(
+                              text: size,
+                              style: TextStyle(
+                                color: sideColor,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const TextSpan(
+                              text: ' · ',
+                              style: TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            TextSpan(
+                              text: market,
+                              style: const TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                       const SizedBox(height: 4),
@@ -1817,7 +2602,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                     color: sideColor.withOpacity(0.15),
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: Text(
+                child: Text(
                     sideText,
                     style: TextStyle(
                       color: sideColor,
@@ -1852,9 +2637,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                           color: _colorTextMain,
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
+            ),
+          ),
+        ],
                   ),
                 ),
                 Expanded(
@@ -1918,7 +2703,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     final sideColor = isLong ? _colorGain : _colorLoss;
     final sideText = side == 'long' ? 'Long' : 'Short';
     
-    // Realized PNL
+    // Realized PNL - from API, just formatted for display
     final realisedPnl = double.tryParse((position['realisedPnl'] ?? '0').toString()) ?? 0.0;
     final isProfitable = realisedPnl >= 0;
     final pnlColor = isProfitable ? _colorGain : _colorLoss;
@@ -1933,12 +2718,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     final leverage = _formatPrice(position['leverage']);
     final exitType = position['exitType'] ?? '';
     
-    // PNL Breakdown
+    // PNL Breakdown - from API, just formatted for display
     final breakdown = position['realisedPnlBreakdown'] as Map<String, dynamic>?;
-    final tradePnl = breakdown != null ? double.tryParse(breakdown['tradePnl'].toString()) ?? 0.0 : 0.0;
-    final fundingFees = breakdown != null ? double.tryParse(breakdown['fundingFees'].toString()) ?? 0.0 : 0.0;
-    final openFees = breakdown != null ? double.tryParse(breakdown['openFees'].toString()) ?? 0.0 : 0.0;
-    final closeFees = breakdown != null ? double.tryParse(breakdown['closeFees'].toString()) ?? 0.0 : 0.0;
+    final tradePnl = breakdown != null ? (double.tryParse(breakdown['tradePnl'].toString()) ?? 0.0).toStringAsFixed(2) : '0.00';
+    final fundingFees = breakdown != null ? (double.tryParse(breakdown['fundingFees'].toString()) ?? 0.0).toStringAsFixed(2) : '0.00';
+    final openFees = breakdown != null ? (double.tryParse(breakdown['openFees'].toString()) ?? 0.0).toStringAsFixed(2) : '0.00';
+    final closeFees = breakdown != null ? (double.tryParse(breakdown['closeFees'].toString()) ?? 0.0).toStringAsFixed(2) : '0.00';
     
     // Format timestamps
     final createdTime = position['createdTime'] ?? 0;
@@ -1960,15 +2745,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       isScrollControlled: true,
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.7,
-        minChildSize: 0.5,
-        maxChildSize: 0.95,
-        expand: false,
-        builder: (context, scrollController) => SingleChildScrollView(
-          controller: scrollController,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+              ),
+              child: SingleChildScrollView(
           child: Container(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1984,7 +2767,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                       market,
                       style: const TextStyle(
                         color: _colorTextMain,
-                        fontSize: 20,
+                        fontSize: 18,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -1993,7 +2776,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                       'Size: $size',
                       style: const TextStyle(
                         color: _colorTextSecondary,
-                        fontSize: 14,
+                        fontSize: 13,
                       ),
                     ),
                   ],
@@ -2001,24 +2784,24 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                 Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                       decoration: BoxDecoration(
                         color: sideColor.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(
+                child: Text(
                         sideText,
                         style: TextStyle(
                           color: sideColor,
-                          fontSize: 14,
+                          fontSize: 13,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
                     if (exitType == 'LIQUIDATION') ...[
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         decoration: BoxDecoration(
                           color: Colors.orange.withOpacity(0.15),
                           borderRadius: BorderRadius.circular(6),
@@ -2027,18 +2810,18 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                           'LIQUIDATED',
                           style: TextStyle(
                             color: Colors.orange,
-                            fontSize: 14,
+                            fontSize: 13,
                             fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
+              ),
+            ),
+          ),
                     ],
                   ],
                 ),
               ],
             ),
             
-            const SizedBox(height: 24),
+            const SizedBox(height: 20),
             
             // Realized PNL - Large display
             Center(
@@ -2048,15 +2831,15 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                     'Realized PnL',
                     style: TextStyle(
                       color: _colorTextSecondary,
-                      fontSize: 14,
+                      fontSize: 13,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   Text(
                     '$pnlSign\$$pnlValue',
                     style: TextStyle(
                       color: pnlColor,
-                      fontSize: 32,
+                      fontSize: 28,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -2064,25 +2847,25 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
               ),
             ),
             
-            const SizedBox(height: 24),
-            const Divider(color: Color(0xFF2A2A2A)),
+            const SizedBox(height: 20),
+            const Divider(color: Color(0xFF2A2A2A), height: 1),
             const SizedBox(height: 16),
             
             // Position Details
             _buildDetailRow('Leverage', '${leverage}x'),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _buildDetailRow('Entry Price', '\$$openPrice'),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _buildDetailRow('Exit Price', exitPriceStr != null ? '\$$exitPriceStr' : 'Still Open'),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _buildDetailRow('Opened', openDateStr),
             if (closeDateStr != null) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               _buildDetailRow('Closed', closeDateStr),
             ],
             
-            const SizedBox(height: 24),
-            const Divider(color: Color(0xFF2A2A2A)),
+            const SizedBox(height: 16),
+            const Divider(color: Color(0xFF2A2A2A), height: 1),
             const SizedBox(height: 16),
             
             // PNL Breakdown
@@ -2090,20 +2873,18 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
               'PNL Breakdown',
               style: TextStyle(
                 color: _colorTextMain,
-                fontSize: 16,
+                fontSize: 15,
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             _buildPnlBreakdownRow('Trade PnL', tradePnl),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _buildPnlBreakdownRow('Funding Fees', fundingFees),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _buildPnlBreakdownRow('Open Fees', openFees),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             _buildPnlBreakdownRow('Close Fees', closeFees),
-            
-            const SizedBox(height: 24),
               ],
             ),
           ),
@@ -2135,11 +2916,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     );
   }
 
-  Widget _buildPnlBreakdownRow(String label, double value) {
-    final isPositive = value >= 0;
+  Widget _buildPnlBreakdownRow(String label, String value) {
+    final numValue = double.tryParse(value) ?? 0.0;
+    final isPositive = numValue >= 0;
     final color = isPositive ? _colorGain : _colorLoss;
     final sign = isPositive ? '+' : '';
-    final displayValue = '$sign\$${value.abs().toStringAsFixed(2)}';
     
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -2152,7 +2933,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
           ),
         ),
         Text(
-          displayValue,
+          '$sign\$$value',
           style: TextStyle(
             color: color,
             fontSize: 14,
@@ -2448,6 +3229,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
                   // Fetch data after state is set
                   if (index == 0 && _positions.isEmpty) {
                     _fetchPositions();
+                  } else if (index == 1 && _orders.isEmpty) {
+                    _fetchOrders();
                   } else if (index == 2 && _closedPositions.isEmpty) {
                     _fetchClosedPositions();
                   }
