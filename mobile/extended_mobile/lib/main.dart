@@ -649,7 +649,7 @@ class _PortfolioBody extends ConsumerStatefulWidget {
   ConsumerState<_PortfolioBody> createState() => _PortfolioBodyState();
 }
 
-class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
+class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBindingObserver {
   String _balances = '';
   bool _loading = false;
   String? _lastWcUri;
@@ -668,6 +668,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   String _selectedTimeRange = '1 Week'; // Time filter for realized PNL
   ExtendedWebSocket? _websocket;
   StreamSubscription<Map<String, dynamic>>? _balanceSubscription;
+  StreamSubscription<Map<String, dynamic>>? _positionSubscription;
+  StreamSubscription<Map<String, dynamic>>? _orderSubscription;
 
   Future<void> _connectWallet() async {
     debugPrint('[CONNECT] Starting wallet connection...');
@@ -983,13 +985,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
     debugPrint('[LOGOUT] Logout complete - wallet address cleared');
   }
   
-  /// Connect to websocket for real-time balance updates
+  /// Connect to websocket for real-time balance and position updates
   Future<void> _connectWebSocket(String apiKey) async {
     try {
       // Disconnect existing connection if any
       await _disconnectWebSocket();
       
-      debugPrint('[WS] Connecting websocket for balance updates');
+      debugPrint('[WS] Connecting websocket for balance and position updates');
       _websocket = ExtendedWebSocket();
       await _websocket!.connect(apiKey);
       
@@ -1025,7 +1027,125 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
         },
       );
       
-      debugPrint('[WS] Websocket connected and listening for balance updates');
+      // Listen to position updates
+      _positionSubscription = _websocket!.positionUpdates.listen(
+        (message) {
+          debugPrint('[WS] Position update received');
+          final positionData = message['data']?['positions'] as List<dynamic>?;
+          if (positionData != null && mounted) {
+            // Convert to List<Map<String, dynamic>>
+            final updatedPositions = positionData
+                .map((p) => Map<String, dynamic>.from(p as Map))
+                .toList();
+            
+            // Merge incremental updates: WebSocket only sends changed positions
+            // We need to update existing positions and add/remove as needed
+            setState(() {
+              // Create a map of existing positions by ID (or market+side if no ID)
+              final existingMap = <String, Map<String, dynamic>>{};
+              for (final pos in _positions) {
+                final id = pos['id']?.toString();
+                final market = pos['market']?.toString() ?? '';
+                final side = pos['side']?.toString() ?? '';
+                final key = id ?? '$market-$side';
+                existingMap[key] = pos;
+              }
+              
+              // Update or add positions from WebSocket
+              for (final updatedPos in updatedPositions) {
+                final id = updatedPos['id']?.toString();
+                final market = updatedPos['market']?.toString() ?? '';
+                final side = updatedPos['side']?.toString() ?? '';
+                final key = id ?? '$market-$side';
+                
+                // Check if position is closed (size is 0 or very small)
+                final sizeStr = updatedPos['size']?.toString() ?? '0';
+                final size = double.tryParse(sizeStr) ?? 0.0;
+                
+                if (size <= 0.00000001) {
+                  // Position closed - remove it
+                  existingMap.remove(key);
+                  debugPrint('[WS] Position closed: $key (size=$size)');
+                } else {
+                  // Position updated or new - add/update it
+                  existingMap[key] = updatedPos;
+                  debugPrint('[WS] Position updated: $key (size=$size)');
+                }
+              }
+              
+              // Convert back to list
+              _positions = existingMap.values.toList();
+            });
+            
+            // Update cache
+            LocalStore.saveCachedPositions(_positions);
+            
+            debugPrint('[WS] Positions merged: ${_positions.length} total positions (${updatedPositions.length} updated)');
+          }
+        },
+        onError: (error) {
+          debugPrint('[WS] Position stream error: $error');
+        },
+      );
+      
+      // Listen to order updates
+      _orderSubscription = _websocket!.orderUpdates.listen(
+        (message) {
+          debugPrint('[WS] Order update received');
+          final orderData = message['data']?['orders'] as List<dynamic>?;
+          if (orderData != null && mounted) {
+            // Convert to List<Map<String, dynamic>>
+            final updatedOrders = orderData
+                .map((o) => Map<String, dynamic>.from(o as Map))
+                .toList();
+            
+            // Merge incremental updates: WebSocket only sends changed orders
+            setState(() {
+              // Create a map of existing orders by ID
+              final existingMap = <String, Map<String, dynamic>>{};
+              for (final order in _orders) {
+                final id = order['id']?.toString();
+                if (id != null) {
+                  existingMap[id] = order;
+                }
+              }
+              
+              // Update or add orders from WebSocket
+              for (final updatedOrder in updatedOrders) {
+                final id = updatedOrder['id']?.toString();
+                if (id == null) continue;
+                
+                // Check if order is closed/cancelled/filled
+                final status = updatedOrder['status']?.toString() ?? '';
+                final isOpen = status == 'NEW' || status == 'PARTIALLY_FILLED';
+                
+                if (isOpen) {
+                  // Order is still open - update it
+                  existingMap[id] = updatedOrder;
+                  debugPrint('[WS] Order updated: $id (status=$status)');
+                } else {
+                  // Order is closed/cancelled/filled - remove it
+                  existingMap.remove(id);
+                  debugPrint('[WS] Order closed: $id (status=$status)');
+                }
+              }
+              
+              // Convert back to list
+              _orders = existingMap.values.toList();
+            });
+            
+            // Update cache
+            LocalStore.saveCachedOrders(_orders);
+            
+            debugPrint('[WS] Orders merged: ${_orders.length} total orders (${updatedOrders.length} updated)');
+          }
+        },
+        onError: (error) {
+          debugPrint('[WS] Order stream error: $error');
+        },
+      );
+      
+      debugPrint('[WS] Websocket connected and listening for balance, position, and order updates');
     } catch (e) {
       debugPrint('[WS] Failed to connect websocket: $e');
       // Don't throw - websocket is optional, REST API will still work
@@ -1036,6 +1156,10 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   Future<void> _disconnectWebSocket() async {
     _balanceSubscription?.cancel();
     _balanceSubscription = null;
+    _positionSubscription?.cancel();
+    _positionSubscription = null;
+    _orderSubscription?.cancel();
+    _orderSubscription = null;
     
     if (_websocket != null) {
       await _websocket!.disconnect();
@@ -3081,6 +3205,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final startTime = DateTime.now();
     debugPrint('[PORTFOLIO_INIT] Starting initState');
     
@@ -4068,8 +4193,28 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> {
   
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _disconnectWebSocket();
     super.dispose();
+  }
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    debugPrint('[PORTFOLIO] App lifecycle changed: $state');
+    
+    if (state == AppLifecycleState.paused) {
+      // App is paused (not just switching apps - that's 'inactive')
+      // Disconnect WebSocket to save resources
+      debugPrint('[PORTFOLIO] App paused - disconnecting WebSocket to save resources');
+      _disconnectWebSocket();
+    } else if (state == AppLifecycleState.resumed) {
+      // App resumed - reconnect WebSocket if we have an API key
+      if (_cachedApiKey != null) {
+        debugPrint('[PORTFOLIO] App resumed - reconnecting WebSocket');
+        _connectWebSocket(_cachedApiKey!);
+      }
+    }
   }
 }
 
