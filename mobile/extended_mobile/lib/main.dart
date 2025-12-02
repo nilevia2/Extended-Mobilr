@@ -670,6 +670,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
   StreamSubscription<Map<String, dynamic>>? _balanceSubscription;
   StreamSubscription<Map<String, dynamic>>? _positionSubscription;
   StreamSubscription<Map<String, dynamic>>? _orderSubscription;
+  String _positionUpdateMode = 'websocket'; // 'websocket' or 'polling'
+  String _pnlPriceType = 'markPrice'; // 'markPrice' or 'midPrice'
+  Timer? _positionPollingTimer;
 
   Future<void> _connectWallet() async {
     debugPrint('[CONNECT] Starting wallet connection...');
@@ -1027,8 +1030,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         },
       );
       
-      // Listen to position updates
-      _positionSubscription = _websocket!.positionUpdates.listen(
+      // Listen to position updates (only if WebSocket mode is enabled)
+      if (_positionUpdateMode == 'websocket') {
+        _positionSubscription = _websocket!.positionUpdates.listen(
         (message) {
           debugPrint('[WS] Position update received');
           final positionData = message['data']?['positions'] as List<dynamic>?;
@@ -1087,6 +1091,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
           debugPrint('[WS] Position stream error: $error');
         },
       );
+      } else {
+        debugPrint('[WS] Position WebSocket disabled - using polling mode');
+      }
       
       // Listen to order updates
       _orderSubscription = _websocket!.orderUpdates.listen(
@@ -1145,10 +1152,76 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         },
       );
       
-      debugPrint('[WS] Websocket connected and listening for balance, position, and order updates');
+      debugPrint('[WS] Websocket connected and listening for balance, position (mode: $_positionUpdateMode), and order updates');
+      
+      // Start polling if in polling mode
+      if (_positionUpdateMode == 'polling') {
+        _startPositionPolling();
+      }
     } catch (e) {
       debugPrint('[WS] Failed to connect websocket: $e');
       // Don't throw - websocket is optional, REST API will still work
+    }
+  }
+  
+  /// Start polling positions every 2 seconds (fast mode)
+  void _startPositionPolling() {
+    _stopPositionPolling(); // Stop existing timer if any
+    
+    if (_cachedApiKey == null) {
+      debugPrint('[POLLING] Cannot start polling - no API key');
+      return;
+    }
+    
+    debugPrint('[POLLING] Starting position polling (every 2 seconds)');
+    
+    // Fetch immediately on start
+    _fetchPositions(silent: true);
+    
+    // Then poll every 2 seconds
+    _positionPollingTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (mounted && _cachedApiKey != null) {
+        debugPrint('[POLLING] Polling positions...');
+        _fetchPositions(silent: true);
+      } else {
+        debugPrint('[POLLING] Stopping - widget not mounted or no API key');
+        _stopPositionPolling();
+      }
+    });
+  }
+  
+  /// Stop polling positions
+  void _stopPositionPolling() {
+    _positionPollingTimer?.cancel();
+    _positionPollingTimer = null;
+    debugPrint('[POLLING] Stopped position polling');
+  }
+  
+  /// Update position update strategy based on mode
+  void _updatePositionUpdateStrategy() {
+    debugPrint('[UPDATE_STRATEGY] Updating strategy to: $_positionUpdateMode');
+    if (_positionUpdateMode == 'polling') {
+      // Stop WebSocket position updates
+      _positionSubscription?.cancel();
+      _positionSubscription = null;
+      debugPrint('[UPDATE_STRATEGY] WebSocket position updates stopped');
+      // Start polling immediately
+      if (_cachedApiKey != null) {
+        debugPrint('[UPDATE_STRATEGY] Starting polling mode');
+        _startPositionPolling();
+      } else {
+        debugPrint('[UPDATE_STRATEGY] Cannot start polling - no API key');
+      }
+    } else {
+      // Stop polling
+      debugPrint('[UPDATE_STRATEGY] Stopping polling, switching to WebSocket');
+      _stopPositionPolling();
+      // WebSocket position updates will be enabled on next connection
+      if (_websocket != null && _websocket!.isConnected && _cachedApiKey != null) {
+        // Reconnect to enable position WebSocket
+        debugPrint('[UPDATE_STRATEGY] Reconnecting WebSocket to enable position updates');
+        _connectWebSocket(_cachedApiKey!);
+      }
     }
   }
   
@@ -1160,6 +1233,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     _positionSubscription = null;
     _orderSubscription?.cancel();
     _orderSubscription = null;
+    _stopPositionPolling();
     
     if (_websocket != null) {
       await _websocket!.disconnect();
@@ -1332,14 +1406,13 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
   }
 
   Future<void> _fetchPositions({bool silent = false}) async {
-    // Load from cache first for instant UI
-    final cachedPositions = await LocalStore.loadCachedPositions();
-    if (cachedPositions != null && cachedPositions.isNotEmpty && mounted) {
-      debugPrint('[POSITIONS] Loading ${cachedPositions.length} positions from cache');
-      setState(() => _positions = cachedPositions);
-    }
-    
+    // Load from cache first for instant UI (only on first load, not during polling)
     if (!silent) {
+      final cachedPositions = await LocalStore.loadCachedPositions();
+      if (cachedPositions != null && cachedPositions.isNotEmpty && mounted) {
+        debugPrint('[POSITIONS] Loading ${cachedPositions.length} positions from cache');
+        setState(() => _positions = cachedPositions);
+      }
       setState(() => _loadingPositions = true);
     }
     try {
@@ -1364,12 +1437,46 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       
       if (data is List) {
         final positions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
-        debugPrint('[POSITIONS] Found ${positions.length} fresh positions');
+        debugPrint('[POSITIONS] Found ${positions.length} fresh positions (silent=$silent, current=${_positions.length}, mode=$_positionUpdateMode)');
         
-        // Update cache and UI
+        // Log CURRENT data (before update)
+        debugPrint('[POSITIONS] ===== CURRENT DATA (BEFORE UPDATE) =====');
+        for (int i = 0; i < _positions.length; i++) {
+          final pos = _positions[i];
+          debugPrint('[POSITIONS] [$i] Market: ${pos['market']}, Size: ${pos['size']}, PNL: ${pos['unrealisedPnl']}, MidPNL: ${pos['midPriceUnrealisedPnl']}, MarkPrice: ${pos['markPrice']}');
+        }
+        
+        // Log NEW data (from API)
+        debugPrint('[POSITIONS] ===== NEW DATA (FROM API) =====');
+        for (int i = 0; i < positions.length; i++) {
+          final pos = positions[i];
+          debugPrint('[POSITIONS] [$i] Market: ${pos['market']}, Size: ${pos['size']}, PNL: ${pos['unrealisedPnl']}, MidPNL: ${pos['midPriceUnrealisedPnl']}, MarkPrice: ${pos['markPrice']}');
+        }
+        
+        // Update cache first
         await LocalStore.saveCachedPositions(positions);
+        
+        // Always update state immediately when we have fresh data
+        // Create a NEW list instance to ensure Flutter detects the change
+        final newPositions = List<Map<String, dynamic>>.from(positions);
+        
         if (mounted) {
-          setState(() => _positions = positions);
+          // Check if positions actually changed before updating
+          final positionsChanged = _positions.length != newPositions.length ||
+              !_arePositionsEqual(_positions, newPositions);
+          
+          debugPrint('[POSITIONS] Positions changed: $positionsChanged (length: ${_positions.length} -> ${newPositions.length})');
+          
+          if (positionsChanged) {
+            setState(() {
+              _positions = newPositions;
+              debugPrint('[POSITIONS] ✅ State updated with ${newPositions.length} positions (silent=$silent, mode=$_positionUpdateMode)');
+            });
+          } else {
+            debugPrint('[POSITIONS] ⚠️ Positions unchanged, skipping UI update');
+          }
+        } else {
+          debugPrint('[POSITIONS] Widget not mounted, skipping state update');
         }
       } else {
         debugPrint('[POSITIONS] No positions data (data is not a List)');
@@ -1584,31 +1691,86 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       );
     }
 
-    if (_positions.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.account_balance_wallet_outlined,
-              size: 48,
-              color: _colorTextSecondary.withOpacity(0.5),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'No positions yet',
-              style: TextStyle(
-                color: Color(0xFF808080),
-                fontSize: 15,
+    // Use CustomScrollView so mode selector scrolls with content
+    return CustomScrollView(
+      slivers: [
+        // Mode and PNL Price selectors (in one row)
+        SliverToBoxAdapter(
+          child: _buildPositionSettingsRow(),
+        ),
+        // Positions list or empty state
+        if (_positions.isEmpty)
+          SliverFillRemaining(
+            child: _buildEmptyPositionsState(),
+          )
+        else
+          SliverPadding(
+            padding: const EdgeInsets.all(16),
+            sliver: SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final position = _positions[index];
+                  return _buildPositionCard(position);
+                },
+                childCount: _positions.length,
               ),
             ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: () {
-                // TODO: Navigate to trade page
-              },
-              child: const Text(
-                'Start trading',
+          ),
+      ],
+    );
+  }
+  
+  /// Check if two position lists have the same content (for change detection)
+  bool _arePositionsEqual(List<Map<String, dynamic>> list1, List<Map<String, dynamic>> list2) {
+    if (list1.length != list2.length) return false;
+    
+    for (int i = 0; i < list1.length; i++) {
+      final p1 = list1[i];
+      final p2 = list2[i];
+      
+      // Compare key fields that affect UI
+      final id1 = p1['id']?.toString() ?? '';
+      final id2 = p2['id']?.toString() ?? '';
+      final size1 = p1['size']?.toString() ?? '0';
+      final size2 = p2['size']?.toString() ?? '0';
+      final pnl1 = p1['unrealisedPnl']?.toString() ?? '0';
+      final pnl2 = p2['unrealisedPnl']?.toString() ?? '0';
+      final markPrice1 = p1['markPrice']?.toString() ?? '0';
+      final markPrice2 = p2['markPrice']?.toString() ?? '0';
+      
+      if (id1 != id2 || size1 != size2 || pnl1 != pnl2 || markPrice1 != markPrice2) {
+        return false;
+      }
+    }
+    
+    return true;
+  }
+  
+  Widget _buildEmptyPositionsState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.account_balance_wallet_outlined,
+            size: 48,
+            color: _colorTextSecondary.withOpacity(0.5),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'No positions yet',
+            style: TextStyle(
+              color: Color(0xFF808080),
+              fontSize: 15,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () {
+              // TODO: Navigate to trade page
+            },
+            child: const Text(
+              'Start trading',
                 style: TextStyle(
                   color: _colorGreenPrimary,
                   fontSize: 14,
@@ -1619,15 +1781,208 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
           ],
         ),
       );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _positions.length,
-      itemBuilder: (context, index) {
-        final position = _positions[index];
-        return _buildPositionCard(position);
-      },
+  }
+  
+  // _buildPositionsList is no longer needed - positions are now in CustomScrollView
+  
+  Widget _buildPositionSettingsRow() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: _colorBgElevated,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          // Update Mode selector
+          Expanded(
+            child: Row(
+              children: [
+                const Text(
+                  'Mode:',
+                  style: TextStyle(
+                    color: _colorTextSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: PopupMenuButton<String>(
+                    initialValue: _positionUpdateMode,
+                    onSelected: (String mode) async {
+                      if (mode != _positionUpdateMode) {
+                        await LocalStore.savePositionUpdateMode(mode);
+                        setState(() => _positionUpdateMode = mode);
+                        _updatePositionUpdateStrategy();
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: _colorBg,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: _colorTextSecondary.withOpacity(0.2)),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _positionUpdateMode == 'websocket' ? 'Normal' : 'Fast',
+                              style: const TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const Icon(
+                            Icons.arrow_drop_down,
+                            color: _colorTextSecondary,
+                            size: 20,
+                          ),
+                        ],
+                      ),
+                    ),
+                    itemBuilder: (BuildContext context) => [
+                      PopupMenuItem<String>(
+                        value: 'websocket',
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Normal Mode (WebSocket)',
+                              style: TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Extended WebSocket connection updates may not be fast, you might miss real-time changes',
+                              style: TextStyle(
+                                color: _colorTextSecondary,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem<String>(
+                        value: 'polling',
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Fast Mode (Polling)',
+                              style: TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Uses API polling for real-time updates. Data usage will increase',
+                              style: TextStyle(
+                                color: _colorTextSecondary,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 16),
+          // PNL Price selector
+          Expanded(
+            child: Row(
+              children: [
+                const Text(
+                  'PNL Price:',
+                  style: TextStyle(
+                    color: _colorTextSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: PopupMenuButton<String>(
+                    initialValue: _pnlPriceType,
+                    onSelected: (String type) async {
+                      if (type != _pnlPriceType) {
+                        await LocalStore.savePnlPriceType(type);
+                        setState(() => _pnlPriceType = type);
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: _colorBg,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: _colorTextSecondary.withOpacity(0.2)),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _pnlPriceType == 'markPrice' ? 'Market Price' : 'Mid Price',
+                              style: const TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const Icon(
+                            Icons.arrow_drop_down,
+                            color: _colorTextSecondary,
+                            size: 20,
+                          ),
+                        ],
+                      ),
+                    ),
+                    itemBuilder: (BuildContext context) => [
+                      const PopupMenuItem<String>(
+                        value: 'markPrice',
+                        child: Text(
+                          'Market Price',
+                          style: TextStyle(
+                            color: _colorTextMain,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'midPrice',
+                        child: Text(
+                          'Mid Price',
+                          style: TextStyle(
+                            color: _colorTextMain,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1709,10 +2064,15 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         ? '${_formatPrice(leverageRaw)}x'
         : '';
     
-    // Get PNL from API, calculate percentage
-    final pnlValue = unrealizedPnlRaw is String 
-        ? (double.tryParse(unrealizedPnlRaw) ?? 0.0)
-        : (unrealizedPnlRaw as num?)?.toDouble() ?? 0.0;
+    // Get PNL from API based on selected price type (markPrice or midPrice)
+    final midPriceUnrealisedPnlRaw = position['midPriceUnrealisedPnl'];
+    final pnlValue = _pnlPriceType == 'midPrice' && midPriceUnrealisedPnlRaw != null
+        ? (midPriceUnrealisedPnlRaw is String 
+            ? (double.tryParse(midPriceUnrealisedPnlRaw) ?? 0.0)
+            : (midPriceUnrealisedPnlRaw as num?)?.toDouble() ?? 0.0)
+        : (unrealizedPnlRaw is String 
+            ? (double.tryParse(unrealizedPnlRaw) ?? 0.0)
+            : (unrealizedPnlRaw as num?)?.toDouble() ?? 0.0);
     final unrealizedPnl = pnlValue.toStringAsFixed(2);
     
     // Manual calculation: PNL percentage = (PNL / margin) * 100
@@ -1884,12 +2244,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     
     // PNL from API - formatted for display
     final unrealisedPnlValue = double.tryParse((position['unrealisedPnl'] ?? '0').toString()) ?? 0.0;
-    final unrealisedPnlMidValue = double.tryParse((position['unrealisedPnlMid'] ?? '0').toString()) ?? 0.0;
+    final midPriceUnrealisedPnlValue = double.tryParse((position['midPriceUnrealisedPnl'] ?? '0').toString()) ?? 0.0;
     final realisedPnlValue = double.tryParse((position['realisedPnl'] ?? '0').toString()) ?? 0.0;
     
     // Manual calculation: PNL percentage = (PNL / margin) * 100
     final unrealisedPnlPercent = marginCalculated > 0 ? (unrealisedPnlValue / marginCalculated * 100) : 0.0;
-    final unrealisedPnlMidPercent = marginCalculated > 0 ? (unrealisedPnlMidValue / marginCalculated * 100) : 0.0;
+    final midPriceUnrealisedPnlPercent = marginCalculated > 0 ? (midPriceUnrealisedPnlValue / marginCalculated * 100) : 0.0;
     final realisedPnlPercent = marginCalculated > 0 ? (realisedPnlValue / marginCalculated * 100) : 0.0;
     
     final unrealisedPnlColor = unrealisedPnlValue >= 0 ? _colorGain : _colorLoss;
@@ -1967,7 +2327,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                 // PNL section
                 _buildPnlRowWithPercent('U. PnL (Mark Price)', unrealisedPnlValue, unrealisedPnlPercent, unrealisedPnlColor),
                 const SizedBox(height: 10),
-                _buildPnlRowWithPercent('U. PnL (Mid Price)', unrealisedPnlMidValue != 0.0 ? unrealisedPnlMidValue : unrealisedPnlValue, unrealisedPnlMidValue != 0.0 ? unrealisedPnlMidPercent : unrealisedPnlPercent, unrealisedPnlColor),
+                _buildPnlRowWithPercent('U. PnL (Mid Price)', midPriceUnrealisedPnlValue != 0.0 ? midPriceUnrealisedPnlValue : unrealisedPnlValue, midPriceUnrealisedPnlValue != 0.0 ? midPriceUnrealisedPnlPercent : unrealisedPnlPercent, unrealisedPnlColor),
                 const SizedBox(height: 10),
                 _buildPnlRowWithPercent('R. PnL', realisedPnlValue, realisedPnlPercent, realisedPnlColor),
                 
@@ -3209,6 +3569,24 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     final startTime = DateTime.now();
     debugPrint('[PORTFOLIO_INIT] Starting initState');
     
+    // Load position update mode preference
+    LocalStore.loadPositionUpdateMode().then((mode) {
+      if (mounted) {
+        setState(() => _positionUpdateMode = mode);
+        debugPrint('[INIT] Loaded position update mode: $mode');
+        // Update strategy after mode is loaded and API key is available
+        // This will be called again when API key is loaded
+      }
+    });
+    
+    // Load PNL price type preference
+    LocalStore.loadPnlPriceType().then((type) {
+      if (mounted) {
+        setState(() => _pnlPriceType = type);
+        debugPrint('[INIT] Loaded PNL price type: $type');
+      }
+    });
+    
     // STEP 1: Load cached API key state IMMEDIATELY to prevent UI glitch
     // This must happen before first build to avoid showing "Connect Wallet" button
     Future.microtask(() async {
@@ -3233,6 +3611,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         
         // Connect websocket for real-time balance updates
         _connectWebSocket(stored['apiKey']!);
+        
+        // Start polling if in polling mode (WebSocket connect also checks this, but ensure it starts)
+        if (_positionUpdateMode == 'polling') {
+          _startPositionPolling();
+        }
         
         debugPrint('[PORTFOLIO_INIT] API key state loaded - preventing UI glitch');
       }
@@ -4024,6 +4407,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       // Connect websocket for real-time balance updates
       _connectWebSocket(key);
       
+      // Start polling if in polling mode (WebSocket connect also checks this, but ensure it starts)
+      if (_positionUpdateMode == 'polling') {
+        _startPositionPolling();
+      }
+      
       // Update portfolio state provider so app bar shows correct state
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ref.read(_portfolioStateProvider.notifier).updateState(address, true);
@@ -4194,6 +4582,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _stopPositionPolling();
     _disconnectWebSocket();
     super.dispose();
   }
@@ -4205,14 +4594,16 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     
     if (state == AppLifecycleState.paused) {
       // App is paused (not just switching apps - that's 'inactive')
-      // Disconnect WebSocket to save resources
-      debugPrint('[PORTFOLIO] App paused - disconnecting WebSocket to save resources');
+      // Disconnect WebSocket and stop polling to save resources
+      debugPrint('[PORTFOLIO] App paused - disconnecting WebSocket and stopping polling');
+      _stopPositionPolling();
       _disconnectWebSocket();
     } else if (state == AppLifecycleState.resumed) {
-      // App resumed - reconnect WebSocket if we have an API key
+      // App resumed - reconnect WebSocket and restart polling if we have an API key
       if (_cachedApiKey != null) {
-        debugPrint('[PORTFOLIO] App resumed - reconnecting WebSocket');
+        debugPrint('[PORTFOLIO] App resumed - reconnecting WebSocket and restarting polling');
         _connectWebSocket(_cachedApiKey!);
+        // Polling will be started by _connectWebSocket if mode is 'polling'
       }
     }
   }

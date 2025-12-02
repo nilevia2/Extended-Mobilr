@@ -17,6 +17,8 @@ class LocalStore {
   static const _cachedPositionsKey = 'cached_positions';
   static const _cachedOrdersKey = 'cached_orders';
   static const _cachedClosedPositionsKey = 'cached_closed_positions';
+  static const _positionUpdateModeKey = 'position_update_mode'; // 'websocket' or 'polling'
+  static const _pnlPriceTypeKey = 'pnl_price_type'; // 'markPrice' or 'midPrice'
   
   // Secure storage for encrypted sensitive keys
   static const _secureStorage = FlutterSecureStorage(
@@ -236,6 +238,30 @@ class LocalStore {
       debugPrint('[CACHE] Error loading cached closed positions: $e');
     }
     return null;
+  }
+
+  /// Save position update mode preference ('websocket' or 'polling')
+  static Future<void> savePositionUpdateMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_positionUpdateModeKey, mode);
+  }
+
+  /// Load position update mode preference (defaults to 'websocket')
+  static Future<String> loadPositionUpdateMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_positionUpdateModeKey) ?? 'websocket';
+  }
+
+  /// Save PNL price type preference ('markPrice' or 'midPrice')
+  static Future<void> savePnlPriceType(String type) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_pnlPriceTypeKey, type);
+  }
+
+  /// Load PNL price type preference (defaults to 'markPrice')
+  static Future<String> loadPnlPriceType() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_pnlPriceTypeKey) ?? 'markPrice';
   }
 }
 
