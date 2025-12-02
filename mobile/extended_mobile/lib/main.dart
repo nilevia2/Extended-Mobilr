@@ -1536,46 +1536,18 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       
       if (data is List) {
         final positions = data.map((p) => Map<String, dynamic>.from(p as Map)).toList();
-        debugPrint('[POSITIONS] Found ${positions.length} fresh positions (silent=$silent, current=${_positions.length}, mode=$_positionUpdateMode)');
-        
-        // Log CURRENT data (before update)
-        debugPrint('[POSITIONS] ===== CURRENT DATA (BEFORE UPDATE) =====');
-        for (int i = 0; i < _positions.length; i++) {
-          final pos = _positions[i];
-          debugPrint('[POSITIONS] [$i] Market: ${pos['market']}, Size: ${pos['size']}, PNL: ${pos['unrealisedPnl']}, MidPNL: ${pos['midPriceUnrealisedPnl']}, MarkPrice: ${pos['markPrice']}');
-        }
-        
-        // Log NEW data (from API)
-        debugPrint('[POSITIONS] ===== NEW DATA (FROM API) =====');
-        for (int i = 0; i < positions.length; i++) {
-          final pos = positions[i];
-          debugPrint('[POSITIONS] [$i] Market: ${pos['market']}, Size: ${pos['size']}, PNL: ${pos['unrealisedPnl']}, MidPNL: ${pos['midPriceUnrealisedPnl']}, MarkPrice: ${pos['markPrice']}');
-        }
         
         // Update cache first
         await LocalStore.saveCachedPositions(positions);
         
-        // Always update state immediately when we have fresh data
-        // Create a NEW list instance to ensure Flutter detects the change
+        // Always update state immediately when we have fresh data.
+        // Create a NEW list instance to ensure Flutter detects the change.
         final newPositions = List<Map<String, dynamic>>.from(positions);
         
         if (mounted) {
-          // Check if positions actually changed before updating
-          final positionsChanged = _positions.length != newPositions.length ||
-              !_arePositionsEqual(_positions, newPositions);
-          
-          debugPrint('[POSITIONS] Positions changed: $positionsChanged (length: ${_positions.length} -> ${newPositions.length})');
-          
-          if (positionsChanged) {
-            setState(() {
-              _positions = newPositions;
-              debugPrint('[POSITIONS] ✅ State updated with ${newPositions.length} positions (silent=$silent, mode=$_positionUpdateMode)');
-            });
-          } else {
-            debugPrint('[POSITIONS] ⚠️ Positions unchanged, skipping UI update');
-          }
-        } else {
-          debugPrint('[POSITIONS] Widget not mounted, skipping state update');
+          setState(() {
+            _positions = newPositions;
+          });
         }
       } else {
         debugPrint('[POSITIONS] No positions data (data is not a List)');
