@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import httpx
+from httpx import HTTPStatusError
 
 from ..config import EndpointConfig
 
@@ -29,6 +30,18 @@ class ExtendedRESTClient:
         url = f"{self._config.api_base_url}{path}"
         with httpx.Client(timeout=self._timeout) as client:
             res = client.post(url, headers=self._headers(api_key), json=json)
+            if res.status_code >= 400:
+                error_detail = res.text
+                try:
+                    error_json = res.json()
+                    error_detail = str(error_json)
+                except:
+                    pass
+                raise HTTPStatusError(
+                    f"Extended API error {res.status_code}: {error_detail}",
+                    request=res.request,
+                    response=res,
+                )
             res.raise_for_status()
             return res.json()
 

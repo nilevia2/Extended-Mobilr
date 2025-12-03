@@ -1030,19 +1030,14 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         apiKey: '', // Clear API key
       );
       
-      // Clear Stark keys
-      final secureStorage = FlutterSecureStorage();
-      final address = _cachedWalletAddress!.toLowerCase();
-      final privKey = 'stark_private_key_for_${address}_0';
-      final pubKey = 'stark_public_key_for_${address}_0';
-      await secureStorage.delete(key: privKey);
-      await secureStorage.delete(key: pubKey);
-      
-      final prefs = await SharedPreferences.getInstance();
-      final vaultKey = 'vault_for_${address}_0';
-      await prefs.remove(vaultKey);
+      // Clear Stark keys using LocalStore method
+      await LocalStore.clearStarkKeys(
+        walletAddress: _cachedWalletAddress!,
+        accountIndex: 0,
+      );
       
       // Clear wallet address from account index storage
+      final prefs = await SharedPreferences.getInstance();
       await prefs.remove('wallet_address_for_0');
       debugPrint('[LOGOUT] Cleared wallet address from account index');
     }
@@ -1367,7 +1362,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     }
     
     if (!silent) {
-      setState(() => _loading = true);
+    setState(() => _loading = true);
     }
     try {
       // Try to get wallet address from connected wallet first
@@ -1776,7 +1771,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
           )
         else
           SliverPadding(
-            padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(16),
             sliver: SliverList(
               delegate: SliverChildBuilderDelegate(
                 (context, index) {
@@ -1865,9 +1860,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
-        children: [
+            children: [
           // Update Mode selector
-          Expanded(
+              Expanded(
             child: Row(
               children: [
                 const Text(
@@ -1899,14 +1894,14 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Flexible(
-                            child: Text(
+                child: Text(
                               _positionUpdateMode == 'websocket' ? 'Normal' : 'Fast',
                               style: const TextStyle(
                                 color: _colorTextMain,
                                 fontSize: 13,
                                 fontWeight: FontWeight.w500,
                               ),
-                              overflow: TextOverflow.ellipsis,
+                  overflow: TextOverflow.ellipsis,
                             ),
                           ),
                           const Icon(
@@ -1982,9 +1977,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                   style: TextStyle(
                     color: _colorTextSecondary,
                     fontSize: 13,
-                  ),
                 ),
-                const SizedBox(width: 8),
+              ),
+              const SizedBox(width: 8),
                 Expanded(
                   child: PopupMenuButton<String>(
                     initialValue: _pnlPriceType,
@@ -2294,6 +2289,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     final size = _formatPrice(position['size']);
     final valueRaw = double.tryParse((position['value'] ?? '0').toString()) ?? 0.0;
     final value = _formatPrice(position['value']);
+    final markPriceRaw = double.tryParse((position['markPrice'] ?? '0').toString()) ?? 0.0;
     final markPrice = _formatPrice(position['markPrice']);
     final entryPrice = _formatPrice(position['openPrice']);
     final leverageRaw = double.tryParse((position['leverage'] ?? '1').toString()) ?? 1.0;
@@ -2471,9 +2467,444 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                     const SizedBox(width: 12),
                     Expanded(
                       child: FilledButton(
-                        onPressed: () {
+                        onPressed: () async {
                           Navigator.pop(context);
-                          // TODO: Implement market close
+                          
+                          try {
+                            // Load wallet/address for backend trading
+                            final stored = await LocalStore.loadApiKeyForAccount(0);
+                            final walletAddress = stored['walletAddress'];
+                            
+                            if (walletAddress == null || walletAddress.isEmpty) {
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Wallet not found. Please login again.'),
+                                  duration: Duration(seconds: 3),
+                                ),
+                              );
+                              return;
+                            }
+                            
+                            // Determine close side (opposite of position side)
+                            final closeSide = isLong ? 'SELL' : 'BUY';
+                            
+                            // Quantity (absolute position size)
+                            final sizeRaw = double.tryParse((position['size'] ?? '0').toString()) ?? 0.0;
+                            if (sizeRaw <= 0) {
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Position size is zero, nothing to close.'),
+                                  duration: Duration(seconds: 3),
+                                ),
+                              );
+                              return;
+                            }
+                            
+                            // Round quantity to market precision (client-side, faster)
+                            final extendedClient = ExtendedClient();
+                            final minOrderSizeChange = await extendedClient.getMarketQuantityPrecision(market);
+                            final minPriceChange = await extendedClient.getMarketPricePrecision(market);
+                            
+                            double roundedQty = sizeRaw;
+                            if (minOrderSizeChange != null) {
+                              roundedQty = ExtendedClient.roundQuantityToMarketPrecision(
+                                quantity: sizeRaw,
+                                minOrderSizeChange: minOrderSizeChange,
+                              );
+                              debugPrint('[MARKET-CLOSE] Rounded qty: $sizeRaw -> $roundedQty (precision: $minOrderSizeChange)');
+                            }
+                            
+                            // Get orderbook to find best prices
+                            debugPrint('[MARKET-CLOSE] Fetching orderbook for $market...');
+                            final orderbook = await extendedClient.getOrderbook(market);
+                            debugPrint('[MARKET-CLOSE] Orderbook response keys: ${orderbook.keys}');
+                            
+                            final orderbookData = orderbook['data'] as Map<String, dynamic>?;
+                            
+                            if (orderbookData == null) {
+                              debugPrint('[MARKET-CLOSE] ERROR: orderbook data is null');
+                              debugPrint('[MARKET-CLOSE] Full response: $orderbook');
+                              throw Exception('Failed to get orderbook data');
+                            }
+                            
+                            debugPrint('[MARKET-CLOSE] Orderbook data keys: ${orderbookData.keys}');
+                            
+                            // Extended API uses "bid" and "ask" (singular), not "bids"/"asks"
+                            // Format: {"bid": [{"price": "...", "qty": "..."}, ...], "ask": [...]}
+                            final bidList = orderbookData['bid'] as List<dynamic>? ?? [];
+                            final askList = orderbookData['ask'] as List<dynamic>? ?? [];
+                            
+                            debugPrint('[MARKET-CLOSE] Bid entries: ${bidList.length}');
+                            debugPrint('[MARKET-CLOSE] Ask entries: ${askList.length}');
+                            
+                            // Convert to price arrays: [price, qty] format
+                            List<List<dynamic>> bids = [];
+                            List<List<dynamic>> asks = [];
+                            
+                            for (final entry in bidList) {
+                              if (entry is Map) {
+                                final price = entry['price']?.toString();
+                                final qty = entry['qty']?.toString();
+                                if (price != null && qty != null) {
+                                  bids.add([price, qty]);
+                                }
+                              }
+                            }
+                            
+                            for (final entry in askList) {
+                              if (entry is Map) {
+                                final price = entry['price']?.toString();
+                                final qty = entry['qty']?.toString();
+                                if (price != null && qty != null) {
+                                  asks.add([price, qty]);
+                                }
+                              }
+                            }
+                            
+                            debugPrint('[MARKET-CLOSE] Parsed bids: ${bids.length}');
+                            debugPrint('[MARKET-CLOSE] Parsed asks: ${asks.length}');
+                            
+                            // For SELL (closing long): use bids (we sell to buyers)
+                            // For BUY (closing short): use asks (we buy from sellers)
+                            final priceLevels = isLong ? bids : asks;
+                            
+                            if (priceLevels.isEmpty) {
+                              debugPrint('[MARKET-CLOSE] ⚠️ No ${isLong ? "bids" : "asks"} in orderbook, using market stats fallback...');
+                              
+                              // Fallback: Use market stats bidPrice/askPrice
+                              try {
+                                final marketData = await extendedClient.getMarket(market);
+                                final marketStats = marketData['marketStats'] as Map<String, dynamic>?;
+                                
+                                if (marketStats != null) {
+                                  final bidPriceStr = marketStats['bidPrice']?.toString();
+                                  final askPriceStr = marketStats['askPrice']?.toString();
+                                  
+                                  if (bidPriceStr != null && askPriceStr != null) {
+                                    final bidPrice = double.tryParse(bidPriceStr);
+                                    final askPrice = double.tryParse(askPriceStr);
+                                    
+                                    if (bidPrice != null && askPrice != null) {
+                                      debugPrint('[MARKET-CLOSE] Using market stats: bidPrice=$bidPrice, askPrice=$askPrice');
+                                      
+                                      // Use bidPrice for SELL, askPrice for BUY
+                                      double targetPrice = isLong ? bidPrice : askPrice;
+                                      
+                                      // Round price
+                                      double roundedPrice = targetPrice;
+                                      if (minPriceChange != null) {
+                                        roundedPrice = ExtendedClient.roundPriceToMarketPrecision(
+                                          price: targetPrice,
+                                          minPriceChange: minPriceChange,
+                                        );
+                                      }
+                                      
+                                      debugPrint('[MARKET-CLOSE] Fallback price: $targetPrice -> $roundedPrice');
+                                      
+                                      // Try placing order with market stats price
+                                      final backend = BackendClient();
+                                      final orderResponse = await backend.createAndPlaceOrder(
+                                        walletAddress: walletAddress,
+                                        accountIndex: 0,
+                                        market: market,
+                                        qty: roundedQty,
+                                        price: roundedPrice,
+                                        side: closeSide,
+                                        postOnly: false,
+                                        reduceOnly: true,
+                                        timeInForce: 'IOC',
+                                        useMainnet: true,
+                                      );
+                                      
+                                      // Check if filled
+                                      final orderId = orderResponse['data']?['id'];
+                                      if (orderId != null) {
+                                        await Future.delayed(const Duration(milliseconds: 1000));
+                                        try {
+                                          final apiKey = await LocalStore.loadApiKey(walletAddress: walletAddress, accountIndex: 0);
+                                          if (apiKey != null) {
+                                            final orderData = await extendedClient.getOrderById(apiKey, orderId);
+                                            final order = orderData['data'];
+                                            if (order != null && order['status'] != 'FILLED') {
+                                              throw Exception('Failed to close position: Order ${order['status']}. ${order['statusReason'] ?? ""}');
+                                            }
+                                          }
+                                        } catch (e) {
+                                          // Continue - order might have filled
+                                        }
+                                      }
+                                      
+                                      return; // Exit early with fallback attempt
+                                    }
+                                  }
+                                }
+                              } catch (e) {
+                                debugPrint('[MARKET-CLOSE] Fallback to market stats also failed: $e');
+                              }
+                              
+                              throw Exception('No ${isLong ? "bids" : "asks"} available in orderbook and market stats fallback failed');
+                            }
+                            
+                            debugPrint('[MARKET-CLOSE] ========================================');
+                            debugPrint('[MARKET-CLOSE] Found ${priceLevels.length} ${isLong ? "bid" : "ask"} levels in orderbook');
+                            debugPrint('[MARKET-CLOSE] Closing ${isLong ? "LONG" : "SHORT"} position: $roundedQty $market');
+                            debugPrint('[MARKET-CLOSE] Side: $closeSide');
+                            debugPrint('[MARKET-CLOSE] ========================================');
+                            
+                            // Show first few price levels for reference
+                            for (int i = 0; i < 3 && i < priceLevels.length; i++) {
+                              final entry = priceLevels[i] as List<dynamic>?;
+                              if (entry != null && entry.length >= 2) {
+                                final p = entry[0].toString();
+                                final q = entry[1].toString();
+                                debugPrint('[MARKET-CLOSE] Orderbook Level ${i + 1}: Price=$p, Qty=$q');
+                              }
+                            }
+                            debugPrint('[MARKET-CLOSE] ========================================');
+                            
+                            // Try placing order at progressively worse prices (levels 1-10)
+                            // Handle partial fills: if level 1 has 400 but we need 1000, fill 400 and continue with 600 at level 2
+                            final backend = BackendClient();
+                            String? lastError;
+                            double remainingQty = roundedQty; // Track remaining quantity to close
+                            double totalFilled = 0.0; // Track total filled across all attempts
+                            
+                            debugPrint('[MARKET-CLOSE] Starting with total qty to close: $remainingQty');
+                            
+                            for (int level = 0; level < 10 && level < priceLevels.length && remainingQty > 0.00000001; level++) {
+                              final priceEntry = priceLevels[level] as List<dynamic>?;
+                              if (priceEntry == null || priceEntry.length < 2) {
+                                debugPrint('[MARKET-CLOSE] ⚠️ Level ${level + 1}: Invalid price entry, skipping');
+                                continue;
+                              }
+                              
+                              final priceStr = priceEntry[0].toString();
+                              final qtyStr = priceEntry[1].toString();
+                              final price = double.tryParse(priceStr) ?? 0.0;
+                              final availableQty = double.tryParse(qtyStr) ?? 0.0;
+                              
+                              if (price <= 0) {
+                                debugPrint('[MARKET-CLOSE] ⚠️ Level ${level + 1}: Invalid price ($priceStr), skipping');
+                                continue;
+                              }
+                              
+                              // Round price to market precision
+                              double roundedPrice = price;
+                              if (minPriceChange != null) {
+                                roundedPrice = ExtendedClient.roundPriceToMarketPrecision(
+                                  price: price,
+                                  minPriceChange: minPriceChange,
+                                );
+                              }
+                              
+                              // Round remaining quantity to market precision
+                              double qtyToPlace = remainingQty;
+                              if (minOrderSizeChange != null) {
+                                qtyToPlace = ExtendedClient.roundQuantityToMarketPrecision(
+                                  quantity: remainingQty,
+                                  minOrderSizeChange: minOrderSizeChange,
+                                );
+                              }
+                              
+                              debugPrint('[MARKET-CLOSE] ┌─────────────────────────────────────┐');
+                              debugPrint('[MARKET-CLOSE] │ ATTEMPT ${level + 1}/10');
+                              debugPrint('[MARKET-CLOSE] │ Price: $price -> $roundedPrice (rounded)');
+                              debugPrint('[MARKET-CLOSE] │ Available Qty: $availableQty');
+                              debugPrint('[MARKET-CLOSE] │ Remaining to Close: $remainingQty');
+                              debugPrint('[MARKET-CLOSE] │ Qty to Place: $qtyToPlace');
+                              debugPrint('[MARKET-CLOSE] │ Already Filled: $totalFilled');
+                              debugPrint('[MARKET-CLOSE] │ Side: $closeSide');
+                              debugPrint('[MARKET-CLOSE] └─────────────────────────────────────┘');
+                              
+                              // If available qty is less than what we need, we'll get partial fill
+                              if (availableQty < qtyToPlace) {
+                                debugPrint('[MARKET-CLOSE] ⚠️ Available qty ($availableQty) < needed ($qtyToPlace) - will partial fill');
+                              }
+                              
+                              try {
+                                debugPrint('[MARKET-CLOSE] → Placing order for $qtyToPlace...');
+                                final orderResponse = await backend.createAndPlaceOrder(
+                                  walletAddress: walletAddress,
+                                  accountIndex: 0,
+                                  market: market,
+                                  qty: qtyToPlace,
+                                  price: roundedPrice,
+                                  side: closeSide,
+                                  postOnly: false,
+                                  reduceOnly: true,
+                                  timeInForce: 'IOC',
+                                  useMainnet: true,
+                                );
+                                
+                                final orderId = orderResponse['data']?['id'];
+                                debugPrint('[MARKET-CLOSE] ✓ Order placed successfully');
+                                debugPrint('[MARKET-CLOSE]   Order ID: $orderId');
+                                
+                                if (orderId == null) {
+                                  lastError = 'Order placed but no order ID returned';
+                                  debugPrint('[MARKET-CLOSE] ✗ ERROR: $lastError');
+                                  continue;
+                                }
+                                
+                                // Wait a bit for IOC order to process
+                                debugPrint('[MARKET-CLOSE] → Waiting 1s for IOC order to process...');
+                                await Future.delayed(const Duration(milliseconds: 1000));
+                                
+                                // Check order status
+                                try {
+                                  final apiKey = await LocalStore.loadApiKey(walletAddress: walletAddress, accountIndex: 0);
+                                  if (apiKey != null) {
+                                    debugPrint('[MARKET-CLOSE] → Checking order status...');
+                                    final orderData = await extendedClient.getOrderById(apiKey, orderId);
+                                    final order = orderData['data'];
+                                    if (order != null) {
+                                      final status = order['status'] as String?;
+                                      final statusReason = order['statusReason'] as String?;
+                                      final filledQtyStr = order['filledQty'] as String?;
+                                      final orderQtyStr = order['qty'] as String?;
+                                      
+                                      final filledQty = double.tryParse(filledQtyStr ?? '0') ?? 0.0;
+                                      final orderQty = double.tryParse(orderQtyStr ?? '0') ?? 0.0;
+                                      
+                                      debugPrint('[MARKET-CLOSE]   Status: $status');
+                                      debugPrint('[MARKET-CLOSE]   Order Qty: $orderQty, Filled: $filledQty');
+                                      if (statusReason != null) {
+                                        debugPrint('[MARKET-CLOSE]   Reason: $statusReason');
+                                      }
+                                      
+                                      // Update total filled
+                                      totalFilled += filledQty;
+                                      remainingQty = roundedQty - totalFilled;
+                                      
+                                      debugPrint('[MARKET-CLOSE]   Total Filled So Far: $totalFilled / $roundedQty');
+                                      debugPrint('[MARKET-CLOSE]   Remaining: $remainingQty');
+                                      
+                                      if (status == 'FILLED') {
+                                        debugPrint('[MARKET-CLOSE] ✅✅✅ SUCCESS! Order FILLED at level ${level + 1}! ✅✅✅');
+                                        debugPrint('[MARKET-CLOSE] Filled Qty: $filledQty');
+                                        
+                                        // Check if we've closed the entire position
+                                        if (remainingQty <= 0.00000001) {
+                                          debugPrint('[MARKET-CLOSE] ✅✅✅ ENTIRE POSITION CLOSED! ✅✅✅');
+                                          debugPrint('[MARKET-CLOSE] Total Filled: $totalFilled');
+                                          break; // Success - position fully closed!
+                                        } else {
+                                          debugPrint('[MARKET-CLOSE] ⚠️ Partial fill: $filledQty filled, $remainingQty remaining');
+                                          debugPrint('[MARKET-CLOSE] → Continuing to next level for remaining $remainingQty...');
+                                          // Continue to next level for remaining quantity
+                                        }
+                                      } else if (status == 'PARTIALLY_FILLED') {
+                                        debugPrint('[MARKET-CLOSE] ⚠️ PARTIAL FILL at level ${level + 1}: $filledQty / $orderQty');
+                                        debugPrint('[MARKET-CLOSE] → Continuing to next level for remaining $remainingQty...');
+                                        // Continue to next level for remaining quantity
+                                      } else if (status == 'CANCELLED' || status == 'REJECTED') {
+                                        lastError = statusReason ?? 'Order $status at level ${level + 1}';
+                                        debugPrint('[MARKET-CLOSE] ✗ Level ${level + 1} FAILED: $lastError');
+                                        
+                                        // If we've filled some quantity, continue; otherwise move to next level
+                                        if (filledQty > 0) {
+                                          debugPrint('[MARKET-CLOSE] ⚠️ But got partial fill: $filledQty, continuing...');
+                                          // Continue to next level
+                                        } else {
+                                          debugPrint('[MARKET-CLOSE] → Moving to next level...');
+                                          // Continue to next level
+                                        }
+                                      } else {
+                                        // Order still processing, wait a bit more and check again
+                                        debugPrint('[MARKET-CLOSE] ⏳ Order still processing ($status), waiting 500ms more...');
+                                        await Future.delayed(const Duration(milliseconds: 500));
+                                        final orderData2 = await extendedClient.getOrderById(apiKey, orderId);
+                                        final order2 = orderData2['data'];
+                                        if (order2 != null) {
+                                          final status2 = order2['status'] as String?;
+                                          final filledQty2Str = order2['filledQty'] as String?;
+                                          final filledQty2 = double.tryParse(filledQty2Str ?? '0') ?? 0.0;
+                                          
+                                          // Update totals
+                                          if (filledQty2 > filledQty) {
+                                            totalFilled += (filledQty2 - filledQty);
+                                            remainingQty = roundedQty - totalFilled;
+                                          }
+                                          
+                                          if (status2 == 'FILLED') {
+                                            debugPrint('[MARKET-CLOSE] ✅✅✅ SUCCESS! Order FILLED at level ${level + 1} (after retry)! ✅✅✅');
+                                            debugPrint('[MARKET-CLOSE] Filled Qty: $filledQty2');
+                                            
+                                            if (remainingQty <= 0.00000001) {
+                                              debugPrint('[MARKET-CLOSE] ✅✅✅ ENTIRE POSITION CLOSED! ✅✅✅');
+                                              break;
+                                            } else {
+                                              debugPrint('[MARKET-CLOSE] → Continuing for remaining $remainingQty...');
+                                            }
+                                          } else if (status2 == 'PARTIALLY_FILLED') {
+                                            debugPrint('[MARKET-CLOSE] ⚠️ PARTIAL FILL: $filledQty2, remaining: $remainingQty');
+                                            debugPrint('[MARKET-CLOSE] → Continuing to next level...');
+                                          } else {
+                                            lastError = 'Order status: $status2';
+                                            debugPrint('[MARKET-CLOSE] ✗ Level ${level + 1} FAILED: $lastError');
+                                            debugPrint('[MARKET-CLOSE] → Moving to next level...');
+                                          }
+                                        }
+                                      }
+                                    } else {
+                                      lastError = 'Order data not found in response';
+                                      debugPrint('[MARKET-CLOSE] ✗ ERROR: $lastError');
+                                    }
+                                  } else {
+                                    lastError = 'API key not found';
+                                    debugPrint('[MARKET-CLOSE] ✗ ERROR: $lastError');
+                                  }
+                                } catch (e) {
+                                  debugPrint('[MARKET-CLOSE] ✗ Failed to check order status: $e');
+                                  lastError = 'Failed to verify order status: $e';
+                                }
+                              } catch (e) {
+                                lastError = 'Failed to place order at level ${level + 1}: $e';
+                                debugPrint('[MARKET-CLOSE] ✗ Level ${level + 1} ERROR: $e');
+                                debugPrint('[MARKET-CLOSE] → Moving to next level...');
+                                // Continue to next level
+                              }
+                              
+                              debugPrint('[MARKET-CLOSE] ─────────────────────────────────────');
+                            }
+                            
+                            debugPrint('[MARKET-CLOSE] ========================================');
+                            
+                            // Check if position is fully closed
+                            if (remainingQty > 0.00000001) {
+                              debugPrint('[MARKET-CLOSE] ❌❌❌ POSITION NOT FULLY CLOSED ❌❌❌');
+                              debugPrint('[MARKET-CLOSE] Total Filled: $totalFilled / $roundedQty');
+                              debugPrint('[MARKET-CLOSE] Remaining: $remainingQty');
+                              debugPrint('[MARKET-CLOSE] Last error: ${lastError ?? "Unknown"}');
+                              debugPrint('[MARKET-CLOSE] ========================================');
+                              throw Exception('Failed to fully close position. Filled: $totalFilled / $roundedQty, Remaining: $remainingQty. Last error: ${lastError ?? "Unknown"}');
+                            } else {
+                              debugPrint('[MARKET-CLOSE] ✅✅✅ POSITION FULLY CLOSED! ✅✅✅');
+                              debugPrint('[MARKET-CLOSE] Total Filled: $totalFilled');
+                              debugPrint('[MARKET-CLOSE] ========================================');
+                            }
+                            
+                            // Refresh positions silently; WS will also update
+                            await _fetchPositions(silent: true);
+                            
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Market close order sent. Position should close if order executed.'),
+                                duration: Duration(seconds: 3),
+                              ),
+                            );
+                          } catch (e) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              SnackBar(
+                                content: Text('Failed to close position: $e'),
+                                duration: const Duration(seconds: 4),
+                              ),
+                            );
+                          }
                         },
                         style: FilledButton.styleFrom(
                           backgroundColor: const Color(0xFF2A2A2A),
@@ -2492,7 +2923,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                         ),
                 ),
               ),
-              const SizedBox(width: 8),
+                const SizedBox(width: 8),
                     IconButton(
                       onPressed: () {
                         // TODO: Implement share
@@ -2606,7 +3037,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
               size: 48,
               color: _colorTextSecondary.withOpacity(0.5),
             ),
-            const SizedBox(height: 16),
+          const SizedBox(height: 16),
             const Text(
               'No open orders',
               style: TextStyle(
@@ -2914,7 +3345,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                   ],
                 ),
                 
-          const SizedBox(height: 16),
+            const SizedBox(height: 16),
                 const Divider(color: Color(0xFF2A2A2A), height: 1),
                 const SizedBox(height: 16),
                 
@@ -2966,7 +3397,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                     const SizedBox(height: 10),
                     _buildDetailRow('Stop Loss', '\$${_formatPrice(stopLoss['triggerPrice'])}'),
                   ],
-                  const SizedBox(height: 16),
+          const SizedBox(height: 16),
                   const Divider(color: Color(0xFF2A2A2A), height: 1),
             const SizedBox(height: 16),
           ],
@@ -2982,9 +3413,71 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    onPressed: () {
+                    onPressed: () async {
                       Navigator.pop(context);
-                      // TODO: Implement cancel order
+                      
+                      try {
+                        // Load API key for account 0
+                        final stored = await LocalStore.loadApiKeyForAccount(0);
+                        final apiKey = stored['apiKey'];
+                        if (apiKey == null || apiKey.isEmpty) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(this.context).showSnackBar(
+                            const SnackBar(
+                              content: Text('API key not found. Please login again.'),
+                              duration: Duration(seconds: 3),
+                            ),
+                          );
+                          return;
+                        }
+                        
+                        // Get order ID
+                        final idRaw = order['id'];
+                        if (idRaw == null) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(this.context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Order ID not found.'),
+                              duration: Duration(seconds: 3),
+                            ),
+                          );
+                          return;
+                        }
+                        final orderId = idRaw is int ? idRaw : int.tryParse(idRaw.toString());
+                        if (orderId == null) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(this.context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Invalid order ID.'),
+                              duration: Duration(seconds: 3),
+                            ),
+                          );
+                          return;
+                        }
+                        
+                        // Call Extended API to cancel order
+                        final client = ExtendedClient();
+                        await client.cancelOrderById(apiKey: apiKey, orderId: orderId);
+                        
+                        // Refresh orders silently (WS will also update)
+                        await _fetchOrders(silent: true);
+                        
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Cancel request sent.'),
+                            duration: Duration(seconds: 3),
+                          ),
+                        );
+                      } catch (e) {
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to cancel order: $e'),
+                            duration: const Duration(seconds: 4),
+                          ),
+                        );
+                      }
                     },
                     style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFF2A2A2A),
@@ -4110,6 +4603,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       }
       return;
     }
+    
     setState(() => _onboarding = true);
     try {
       debugPrint('[ONBOARD] Starting onboarding for $address');
@@ -4212,33 +4706,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         accountIndex: 0,
       );
       debugPrint('[ONBOARD] Onboarding complete');
+      // Stark keys are stored on backend only - no local storage needed
       
       // Check again before updating state
       if (!mounted) {
         debugPrint('[ONBOARD] Widget disposed after onboarding complete, aborting');
         return;
-      }
-      
-      // Store Stark keys locally for client-side order signing
-      final starkPrivateKey = onboardResponse['stark_private_key'] as String?;
-      final starkPublicKey = onboardResponse['stark_public_key'] as String?;
-      if (starkPrivateKey != null && starkPublicKey != null) {
-        // Store Stark keys temporarily (vault will be set after API key issuance)
-        // We'll update with vault ID once we fetch account info
-        debugPrint('[ONBOARD] Storing Stark keys locally (vault will be fetched after API key issuance)');
-        // Store keys with vault=0 temporarily, will update after API key issuance
-        try {
-          await LocalStore.saveStarkKeys(
-            walletAddress: address,
-            accountIndex: 0,
-            starkPrivateKey: starkPrivateKey,
-            starkPublicKey: starkPublicKey,
-            vault: 0, // Temporary, will be updated after API key issuance
-          );
-        } catch (e) {
-          debugPrint('[ONBOARD] Error saving Stark keys: $e');
-          // Continue anyway
-        }
       }
       
       // Show success message first
@@ -4472,6 +4945,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       }
       
       debugPrint('[APIKEY] Saving API key locally: ${key.substring(0, 8)}...');
+      // Vault is stored on backend - no local storage needed
       await LocalStore.saveApiKey(walletAddress: address, accountIndex: 0, apiKey: key);
       setState(() => _cachedApiKey = key);
       
@@ -4532,39 +5006,12 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
       }
       
       if (accountInfo != null) {
-        
         // Check again after async operation
         if (!mounted) {
           debugPrint('[APIKEY] Widget disposed after account info fetch');
           return;
         }
-        
-        final accountData = accountInfo['data'] as Map<String, dynamic>?;
-        // l2Vault can be either String or int, handle both
-        final vaultValue = accountData?['l2Vault'];
-        final vault = vaultValue is String ? int.tryParse(vaultValue) : (vaultValue as int?);
-        
-        // Get Stark keys from onboarding response (stored earlier)
-        final starkKeys = await LocalStore.loadStarkKeys(walletAddress: address, accountIndex: 0);
-        if (starkKeys == null) {
-          debugPrint('[APIKEY] Stark keys not found in local storage');
-        } else if (vault != null) {
-          // Update vault if we have it
-          try {
-            await LocalStore.saveStarkKeys(
-              walletAddress: address,
-              accountIndex: 0,
-              starkPrivateKey: starkKeys['starkPrivateKey'] as String,
-              starkPublicKey: starkKeys['starkPublicKey'] as String,
-              vault: vault,
-            );
-            debugPrint('[APIKEY] Stark keys and vault stored locally (vault: $vault)');
-          } catch (e) {
-            debugPrint('[APIKEY] Error saving Stark keys with vault: $e');
-          }
-        } else {
-          debugPrint('[APIKEY] Vault ID not found in account info');
-        }
+        debugPrint('[APIKEY] Account info loaded for $address');
       }
       
       // Referral code is set during onboarding, no need to set it again
@@ -4630,7 +5077,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
               const Text('Approve in your wallet', style: TextStyle(color: _colorTextMain, fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
               const Text(
-                'We sent a signing request to your wallet. If you don’t see it, open your wallet app and check pending requests.',
+                'We sent a signing request to your wallet. If you don\'t see it, open your wallet app and check pending requests.',
                 style: TextStyle(color: _colorTextSecondary),
                 textAlign: TextAlign.center,
               ),

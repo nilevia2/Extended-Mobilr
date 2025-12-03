@@ -81,3 +81,4 @@ mobile/extended_mobile/ios/.flutter-plugins-dependencies
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+backend/.venv311/*

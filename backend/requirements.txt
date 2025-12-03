@@ -1,7 +1,7 @@
 fastapi>=0.110.0
 uvicorn[standard]>=0.22.0
 httpx>=0.27.0
-pydantic>=2.5.0
+pydantic>=2.9.0
 python-dotenv>=1.0.0
 web3>=6.11.0
 SQLAlchemy>=2.0.21
@@ -9,5 +9,11 @@ psycopg[binary]>=3.1.10
 PyJWT>=2.8.0
 pytest>=8.1.0
 strenum>=0.4.15
-fast-stark-crypto>=0.1.7
+fast-stark-crypto==0.3.8
+aiohttp>=3.10.11
+eth-account>=0.12.0
+pyyaml>=6.0.1
+sortedcontainers>=2.4.0
+tenacity>=9.1.2
+websockets>=12.0,<14.0
 

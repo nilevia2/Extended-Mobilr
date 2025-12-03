@@ -144,8 +144,48 @@ def onboarding_complete(payload: OnboardingCompleteRequest) -> OnboardingComplet
             if body.get("status") != "OK":
                 raise HTTPException(status_code=400, detail=f"Onboarding error: {body.get('error') or body}")
 
+        # Extract vault ID from onboarding response
+        vault = None
+        try:
+            default_account = body.get("data", {}).get("defaultAccount", {})
+            print(f"[ONBOARD-COMPLETE:{rid}] Default account data: {default_account}")
+            
+            # Try multiple possible fields for vault
+            vault_str = (
+                default_account.get("l2Vault") or 
+                default_account.get("positionId") or
+                default_account.get("vault")
+            )
+            
+            if vault_str:
+                # Handle both string and int
+                if isinstance(vault_str, int):
+                    vault = vault_str
+                elif isinstance(vault_str, str):
+                    vault = int(vault_str)
+                else:
+                    vault = int(vault_str)
+                print(f"[ONBOARD-COMPLETE:{rid}] Extracted vault: {vault} (from: {vault_str})")
+            else:
+                print(f"[ONBOARD-COMPLETE:{rid}] WARNING: No vault found in response. Available keys: {list(default_account.keys())}")
+                vault = None  # Will be fetched when API key is issued or on first order
+        except Exception as e:
+            import traceback
+            print(f"[ONBOARD-COMPLETE:{rid}] ERROR: Could not extract vault from response: {e}")
+            print(f"[ONBOARD-COMPLETE:{rid}] Traceback: {traceback.format_exc()}")
+            print(f"[ONBOARD-COMPLETE:{rid}] Full response body: {body}")
+            vault = None  # Will be fetched when API key is issued or on first order
+        
+        # Normalize wallet address (database stores lowercase)
+        normalized_wallet = payload.wallet_address.lower()
+        print(f"[ONBOARD-COMPLETE:{rid}] Storing user record. Wallet: {normalized_wallet}, Account: {payload.account_index}, Vault: {vault}")
+        
         STORE.upsert_user(
-            wallet_address=payload.wallet_address, account_index=payload.account_index, stark_private_key=priv_hex, stark_public_key=pub_hex
+            wallet_address=normalized_wallet,
+            account_index=payload.account_index,
+            stark_private_key=priv_hex,
+            stark_public_key=pub_hex,
+            vault=vault,
         )
 
         return OnboardingCompleteResponse(stark_private_key=priv_hex, stark_public_key=pub_hex, account_index=payload.account_index, wallet_address=payload.wallet_address)

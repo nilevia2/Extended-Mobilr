@@ -8,9 +8,6 @@ class LocalStore {
   static const _marketsKey = 'cached_markets_v1';
   static const _watchlistKey = 'watchlist_v1';
   static const _apiKeyPrefix = 'api_key_for_'; // suffixed with <address>_<index>
-  static const _starkPrivateKeyPrefix = 'stark_private_key_for_'; // suffixed with <address>_<index>
-  static const _starkPublicKeyPrefix = 'stark_public_key_for_'; // suffixed with <address>_<index>
-  static const _vaultPrefix = 'vault_for_'; // suffixed with <address>_<index>
   static const _walletAddressPrefix = 'wallet_address_for_'; // suffixed with <address>_<index>
   static const _referralCodeKey = 'referral_code';
   static const _cachedBalanceKey = 'cached_balance';
@@ -19,6 +16,12 @@ class LocalStore {
   static const _cachedClosedPositionsKey = 'cached_closed_positions';
   static const _positionUpdateModeKey = 'position_update_mode'; // 'websocket' or 'polling'
   static const _pnlPriceTypeKey = 'pnl_price_type'; // 'markPrice' or 'midPrice'
+  static const _storageLocationKey = 'storage_location'; // 'server' or 'local'
+  static const _starkPrivateKeyPrefix = 'stark_private_key_for_'; // suffixed with <address>_<index>
+  static const _starkPublicKeyPrefix = 'stark_public_key_for_'; // suffixed with <address>_<index>
+  static const _vaultPrefix = 'vault_for_'; // suffixed with <address>_<index>
+  static const _marketPrecisionPrefix = 'market_precision_'; // suffixed with market name (e.g., BTC-USD)
+  static const _marketPrecisionTimestampPrefix = 'market_precision_ts_'; // timestamp for cache expiry
   
   // Secure storage for encrypted sensitive keys
   static const _secureStorage = FlutterSecureStorage(
@@ -104,69 +107,6 @@ class LocalStore {
   static Future<String?> loadReferralCode() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_referralCodeKey);
-  }
-  
-  // Stark key storage (encrypted)
-  static String _starkPrivateKeyKey(String address, int index) {
-    final a = address.toLowerCase();
-    return '$_starkPrivateKeyPrefix${a}_$index';
-  }
-  
-  static String _starkPublicKeyKey(String address, int index) {
-    final a = address.toLowerCase();
-    return '$_starkPublicKeyPrefix${a}_$index';
-  }
-  
-  static String _vaultKey(String address, int index) {
-    final a = address.toLowerCase();
-    return '$_vaultPrefix${a}_$index';
-  }
-  
-  static Future<void> saveStarkKeys({
-    required String walletAddress,
-    required int accountIndex,
-    required String starkPrivateKey,
-    required String starkPublicKey,
-    required int vault,
-  }) async {
-    // Store Stark keys encrypted in secure storage
-    final privKey = _starkPrivateKeyKey(walletAddress, accountIndex);
-    final pubKey = _starkPublicKeyKey(walletAddress, accountIndex);
-    await _secureStorage.write(key: privKey, value: starkPrivateKey);
-    await _secureStorage.write(key: pubKey, value: starkPublicKey);
-    
-    // Store vault ID in regular storage (not sensitive)
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_vaultKey(walletAddress, accountIndex), vault);
-  }
-  
-  static Future<Map<String, dynamic>?> loadStarkKeys({
-    required String walletAddress,
-    required int accountIndex,
-  }) async {
-    final privKey = _starkPrivateKeyKey(walletAddress, accountIndex);
-    final pubKey = _starkPublicKeyKey(walletAddress, accountIndex);
-    final vaultKey = _vaultKey(walletAddress, accountIndex);
-    
-    final starkPrivateKey = await _secureStorage.read(key: privKey);
-    final starkPublicKey = await _secureStorage.read(key: pubKey);
-    
-    if (starkPrivateKey == null || starkPublicKey == null) {
-      return null;
-    }
-    
-    final prefs = await SharedPreferences.getInstance();
-    final vault = prefs.getInt(vaultKey);
-    
-    if (vault == null) {
-      return null;
-    }
-    
-    return {
-      'starkPrivateKey': starkPrivateKey,
-      'starkPublicKey': starkPublicKey,
-      'vault': vault,
-    };
   }
   
   // Cache methods for fast UI loading
@@ -262,6 +202,136 @@ class LocalStore {
   static Future<String> loadPnlPriceType() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_pnlPriceTypeKey) ?? 'markPrice';
+  }
+
+  /// Save storage location preference ('server' or 'local')
+  static Future<void> saveStorageLocation(String location) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_storageLocationKey, location);
+  }
+
+  /// Load storage location preference (defaults to 'server')
+  static Future<String> loadStorageLocation() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_storageLocationKey) ?? 'server';
+  }
+
+  static String _starkPrivateKeyKey(String address, int index) {
+    final a = address.toLowerCase();
+    return '$_starkPrivateKeyPrefix${a}_$index';
+  }
+
+  static String _starkPublicKeyKey(String address, int index) {
+    final a = address.toLowerCase();
+    return '$_starkPublicKeyPrefix${a}_$index';
+  }
+
+  static String _vaultKey(String address, int index) {
+    final a = address.toLowerCase();
+    return '$_vaultPrefix${a}_$index';
+  }
+
+  /// Save Stark keys locally (encrypted)
+  static Future<void> saveStarkKeys({
+    required String walletAddress,
+    required int accountIndex,
+    required String starkPrivateKey,
+    required String starkPublicKey,
+    required int vault,
+  }) async {
+    final privKey = _starkPrivateKeyKey(walletAddress, accountIndex);
+    final pubKey = _starkPublicKeyKey(walletAddress, accountIndex);
+    await _secureStorage.write(key: privKey, value: starkPrivateKey);
+    await _secureStorage.write(key: pubKey, value: starkPublicKey);
+    
+    // Vault is not sensitive, store in regular SharedPreferences
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_vaultKey(walletAddress, accountIndex), vault);
+  }
+
+  /// Load Stark keys locally (encrypted)
+  static Future<Map<String, dynamic>?> loadStarkKeys({
+    required String walletAddress,
+    required int accountIndex,
+  }) async {
+    final privKey = _starkPrivateKeyKey(walletAddress, accountIndex);
+    final pubKey = _starkPublicKeyKey(walletAddress, accountIndex);
+    final privateKey = await _secureStorage.read(key: privKey);
+    final publicKey = await _secureStorage.read(key: pubKey);
+    
+    if (privateKey == null || publicKey == null) {
+      return null;
+    }
+    
+    final prefs = await SharedPreferences.getInstance();
+    final vault = prefs.getInt(_vaultKey(walletAddress, accountIndex));
+    
+    if (vault == null) {
+      return null;
+    }
+    
+    return {
+      'starkPrivateKey': privateKey,
+      'starkPublicKey': publicKey,
+      'vault': vault,
+    };
+  }
+
+  /// Clear Stark keys locally
+  static Future<void> clearStarkKeys({
+    required String walletAddress,
+    required int accountIndex,
+  }) async {
+    final privKey = _starkPrivateKeyKey(walletAddress, accountIndex);
+    final pubKey = _starkPublicKeyKey(walletAddress, accountIndex);
+    await _secureStorage.delete(key: privKey);
+    await _secureStorage.delete(key: pubKey);
+    
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_vaultKey(walletAddress, accountIndex));
+  }
+  
+  /// Save market precision (minOrderSizeChange) for client-side order signing
+  /// Cache expires after 10 minutes
+  static Future<void> saveMarketPrecision({
+    required String marketName,
+    required String minOrderSizeChange,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = '$_marketPrecisionPrefix$marketName';
+    final timestampKey = '$_marketPrecisionTimestampPrefix$marketName';
+    await prefs.setString(key, minOrderSizeChange);
+    await prefs.setInt(timestampKey, DateTime.now().millisecondsSinceEpoch);
+    debugPrint('[CACHE] Saved market precision for $marketName: $minOrderSizeChange');
+  }
+  
+  /// Load cached market precision (returns null if expired or not found)
+  /// Cache expires after 10 minutes
+  static Future<String?> loadMarketPrecision(String marketName) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = '$_marketPrecisionPrefix$marketName';
+    final timestampKey = '$_marketPrecisionTimestampPrefix$marketName';
+    
+    final precision = prefs.getString(key);
+    final timestamp = prefs.getInt(timestampKey);
+    
+    if (precision == null || timestamp == null) {
+      return null;
+    }
+    
+    // Check if cache expired (10 minutes)
+    final cacheAge = DateTime.now().millisecondsSinceEpoch - timestamp;
+    const cacheTTL = 10 * 60 * 1000; // 10 minutes in milliseconds
+    
+    if (cacheAge > cacheTTL) {
+      debugPrint('[CACHE] Market precision cache expired for $marketName');
+      await prefs.remove(key);
+      await prefs.remove(timestampKey);
+      return null;
+    }
+    
+    debugPrint('[CACHE] Using cached market precision for $marketName: $precision');
+    return precision;
   }
 }
 

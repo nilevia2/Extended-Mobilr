@@ -173,8 +173,16 @@ def issue_api_key(payload: ApiKeyIssueRequest) -> ApiKeyIssueResponse:
         api_key = key_data.get("key")
         if not api_key:
             raise HTTPException(status_code=400, detail="No API key returned")
-    # Persist in local STORE
-    STORE.upsert_user(wallet_address=payload.wallet_address, account_index=payload.account_index, api_key=api_key)
+    # Persist in local STORE - normalize wallet address
+    normalized_wallet = payload.wallet_address.lower()
+    print(f"[APIKEY-ISSUE:{rid}] Storing API key. Wallet: {normalized_wallet}, Account: {payload.account_index}")
+    STORE.upsert_user(wallet_address=normalized_wallet, account_index=payload.account_index, api_key=api_key)
+    # Verify it was stored
+    stored_record = STORE.get_user(wallet_address=normalized_wallet, account_index=payload.account_index)
+    if stored_record:
+        print(f"[APIKEY-ISSUE:{rid}] User record verified. API key stored: {stored_record.api_key[:8]}...")
+    else:
+        print(f"[APIKEY-ISSUE:{rid}] WARNING: User record not found after storage!")
     return ApiKeyIssueResponse(api_key=api_key, account_id=account_id)
 
 
