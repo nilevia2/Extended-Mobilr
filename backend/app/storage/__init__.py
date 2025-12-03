@@ -10,9 +10,16 @@ def _init_store():
     db_url: Optional[str] = get_db_url_from_env()
     if db_url:
         try:
-            return DatabaseStore(db_url)
-        except Exception:
+            print(f"[STORAGE] DATABASE_URL found, initializing DatabaseStore...")
+            store = DatabaseStore(db_url)
+            print(f"[STORAGE] ✅ DatabaseStore initialized successfully")
+            return store
+        except Exception as e:
+            print(f"[STORAGE] ⚠️ Failed to initialize DatabaseStore: {e}")
+            print(f"[STORAGE] Falling back to MemoryStore")
             pass
+    else:
+        print(f"[STORAGE] ⚠️ No DATABASE_URL found, using MemoryStore (data will be lost on restart)")
     return MemoryStore()
 
 

@@ -35,8 +35,12 @@ class UserRecord:
 
 class DatabaseStore:
     def __init__(self, db_url: str) -> None:
+        # Mask password in logs for security
+        masked_url = db_url.split('@')[1] if '@' in db_url else db_url
+        print(f"[DATABASE] Connecting to database: ...@{masked_url}")
         self._engine = create_engine(db_url, pool_pre_ping=True)
         Base.metadata.create_all(self._engine)
+        print(f"[DATABASE] ✅ Database tables created/verified")
 
     def upsert_user(
         self,
