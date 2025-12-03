@@ -3544,6 +3544,14 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
 
     // Filter positions based on time range
     final filteredPositions = _filterPositionsByTimeRange(_closedPositions, _selectedTimeRange);
+    
+    // Sort by latest closed date (newest first)
+    final sortedPositions = List<Map<String, dynamic>>.from(filteredPositions);
+    sortedPositions.sort((a, b) {
+      final closedTimeA = a['closedTime'] ?? a['createdTime'] ?? 0;
+      final closedTimeB = b['closedTime'] ?? b['createdTime'] ?? 0;
+      return (closedTimeB as int).compareTo(closedTimeA as int); // Descending order
+    });
 
     return Column(
       children: [
@@ -3560,7 +3568,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         ),
         // List of positions
         Expanded(
-          child: filteredPositions.isEmpty
+          child: sortedPositions.isEmpty
               ? const Center(
                   child: Text(
                     'No positions in this time range',
@@ -3572,8 +3580,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                 )
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 8),
-                  itemCount: filteredPositions.length,
-                  itemBuilder: (context, index) => _buildClosedPositionCard(filteredPositions[index]),
+                  itemCount: sortedPositions.length,
+                  itemBuilder: (context, index) => _buildClosedPositionCard(sortedPositions[index]),
                 ),
         ),
       ],
@@ -3710,11 +3718,19 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     final exitPrice = position['exitPrice'];
     final exitPriceStr = exitPrice != null ? _formatPrice(exitPrice) : null;
     
-    // Format timestamp
-    final createdTime = position['createdTime'] ?? 0;
-    final openDate = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+    // Format timestamp - use closedTime if available, otherwise fallback to createdTime
     final monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    final formattedDate = '${monthNames[openDate.month]} ${openDate.day}, ${openDate.year} · ${openDate.hour.toString().padLeft(2, '0')}:${openDate.minute.toString().padLeft(2, '0')}:${openDate.second.toString().padLeft(2, '0')}';
+    String formattedDate;
+    final closedTime = position['closedTime'];
+    if (closedTime != null) {
+      final closeDate = DateTime.fromMillisecondsSinceEpoch(closedTime as int);
+      formattedDate = 'Closed at: ${monthNames[closeDate.month]} ${closeDate.day}, ${closeDate.year} · ${closeDate.hour.toString().padLeft(2, '0')}:${closeDate.minute.toString().padLeft(2, '0')}:${closeDate.second.toString().padLeft(2, '0')}';
+    } else {
+      // Fallback to createdTime if closedTime is not available
+      final createdTime = position['createdTime'] ?? 0;
+      final openDate = DateTime.fromMillisecondsSinceEpoch(createdTime as int);
+      formattedDate = 'Closed at: ${monthNames[openDate.month]} ${openDate.day}, ${openDate.year} · ${openDate.hour.toString().padLeft(2, '0')}:${openDate.minute.toString().padLeft(2, '0')}:${openDate.second.toString().padLeft(2, '0')}';
+    }
 
     return InkWell(
       onTap: () => _showClosedPositionDetails(position),
@@ -4556,8 +4572,11 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                     _fetchPositions();
                   } else if (index == 1 && _orders.isEmpty) {
                     _fetchOrders();
-                  } else if (index == 2 && _closedPositions.isEmpty) {
-                    _fetchClosedPositions();
+                  } else if (index == 2) {
+                    // Always fetch fresh data for realized tab
+                    // Silent if we have cached data (show immediately, refresh in background)
+                    // Show loader if no cached data
+                    _fetchClosedPositions(silent: _closedPositions.isNotEmpty);
                   }
                 },
               ),
