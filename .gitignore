@@ -82,3 +82,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 backend/.venv311/*
+
+# Vendor directory (Python SDK - can be installed separately)
+# vendor/
