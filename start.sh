@@ -7,7 +7,7 @@ echo "🚀 Starting Extended Backend..."
 
 # Install dependencies
 echo "📦 Installing Python dependencies..."
-pip install -r backend/requirements.txt
+cd backend && pip install -r requirements.txt && cd ..
 
 # Start the FastAPI server
 echo "🌐 Starting FastAPI server..."
