@@ -4182,7 +4182,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                               : sizeNum;
                                           final markPriceNum = double.tryParse(markPrice.replaceAll(',', '')) ?? 0.0;
                                           
-                                          await backend.createAndPlaceOrder(
+                                          final orderResponse = await backend.createAndPlaceOrder(
                                             walletAddress: walletAddress,
                                             accountIndex: 0,
                                             market: market,
@@ -4201,9 +4201,22 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                             stopLossPriceType: 'MARKET',
                                           );
                                           
+                                          final status = orderResponse['data']?['status']?.toString().toUpperCase();
+                                          final statusReason = orderResponse['data']?['statusReason']?.toString();
+                                          if (status == 'REJECTED' || status == 'CANCELLED') {
+                                            final reason = statusReason?.isNotEmpty == true ? statusReason : 'Order was $status';
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                content: Text('TP/SL rejected: $reason'),
+                                                backgroundColor: _colorLoss,
+                                              ),
+                                            );
+                                            return;
+                                          }
+                                          
                                           ScaffoldMessenger.of(context).showSnackBar(
                                             const SnackBar(
-                                              content: Text('TP/SL order placed successfully'),
+                                              content: Text('TP/SL placed'),
                                               backgroundColor: _colorGreenPrimary,
                                             ),
                                           );
@@ -4213,7 +4226,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                         } catch (e) {
                                           ScaffoldMessenger.of(context).showSnackBar(
                                             SnackBar(
-                                              content: Text('Failed to place TP/SL order: $e'),
+                                              content: Text('Failed to place TP/SL: $e'),
                                               backgroundColor: _colorLoss,
                                             ),
                                           );
