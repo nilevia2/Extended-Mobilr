@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from decimal import Decimal
-from typing import Dict
+from typing import Dict, Optional
 from datetime import datetime, timedelta
 
 import httpx
@@ -33,10 +33,13 @@ try:
     from x10.perpetual.accounts import StarkPerpetualAccount  # type: ignore
     from x10.perpetual.configuration import MAINNET_CONFIG, TESTNET_CONFIG  # type: ignore
     from x10.perpetual.markets import MarketModel  # type: ignore
-    from x10.perpetual.order_object import create_order_object  # type: ignore
+    from x10.perpetual.order_object import OrderTpslTriggerParam, create_order_object  # type: ignore
     from x10.perpetual.orders import (  # type: ignore
         NewOrderModel,
+        OrderPriceType,
         OrderSide,
+        OrderTriggerPriceType,
+        OrderTpslType,
         TimeInForce,
     )
 except ImportError as e:
@@ -106,6 +109,15 @@ def build_signed_limit_order_json(
     reduce_only: bool = False,
     time_in_force: str = "GTT",
     use_mainnet: bool = True,
+    tp_sl_type: Optional[str] = None,
+    take_profit_trigger_price: Optional[Decimal] = None,
+    take_profit_trigger_price_type: Optional[str] = None,
+    take_profit_price: Optional[Decimal] = None,
+    take_profit_price_type: Optional[str] = None,
+    stop_loss_trigger_price: Optional[Decimal] = None,
+    stop_loss_trigger_price_type: Optional[str] = None,
+    stop_loss_price: Optional[Decimal] = None,
+    stop_loss_price_type: Optional[str] = None,
 ) -> Dict:
     """
     Creates a signed limit order body using vendored SDK.
@@ -135,6 +147,50 @@ def build_signed_limit_order_json(
         api_key=api_key,
     )
 
+    # Build TP/SL parameters if provided
+    tp_sl_type_enum = None
+    take_profit_param = None
+    stop_loss_param = None
+
+    if tp_sl_type:
+        tp_sl_type_enum = OrderTpslType(tp_sl_type.upper())
+
+    if take_profit_trigger_price is not None and take_profit_price is not None:
+        if take_profit_trigger_price_type is None:
+            take_profit_trigger_price_type = "LAST"
+        if take_profit_price_type is None:
+            take_profit_price_type = "LIMIT"
+        
+        # Round TP prices to market precision
+        rounded_tp_trigger = market_model.trading_config.round_price(take_profit_trigger_price)
+        rounded_tp_price = market_model.trading_config.round_price(take_profit_price)
+        
+        take_profit_param = OrderTpslTriggerParam(
+            trigger_price=rounded_tp_trigger,
+            trigger_price_type=OrderTriggerPriceType(take_profit_trigger_price_type.upper()),
+            price=rounded_tp_price,
+            price_type=OrderPriceType(take_profit_price_type.upper()),
+        )
+        print(f"[ORDER-SIGNING] Take Profit: trigger={rounded_tp_trigger} ({take_profit_trigger_price_type}), price={rounded_tp_price} ({take_profit_price_type})")
+
+    if stop_loss_trigger_price is not None and stop_loss_price is not None:
+        if stop_loss_trigger_price_type is None:
+            stop_loss_trigger_price_type = "LAST"
+        if stop_loss_price_type is None:
+            stop_loss_price_type = "LIMIT"
+        
+        # Round SL prices to market precision
+        rounded_sl_trigger = market_model.trading_config.round_price(stop_loss_trigger_price)
+        rounded_sl_price = market_model.trading_config.round_price(stop_loss_price)
+        
+        stop_loss_param = OrderTpslTriggerParam(
+            trigger_price=rounded_sl_trigger,
+            trigger_price_type=OrderTriggerPriceType(stop_loss_trigger_price_type.upper()),
+            price=rounded_sl_price,
+            price_type=OrderPriceType(stop_loss_price_type.upper()),
+        )
+        print(f"[ORDER-SIGNING] Stop Loss: trigger={rounded_sl_trigger} ({stop_loss_trigger_price_type}), price={rounded_sl_price} ({stop_loss_price_type})")
+
     order: NewOrderModel = create_order_object(
         account=account,
         market=market_model,
@@ -145,6 +201,9 @@ def build_signed_limit_order_json(
         reduce_only=reduce_only,
         starknet_domain=x10_env_cfg.starknet_domain,
         time_in_force=tif_enum,
+        tp_sl_type=tp_sl_type_enum,
+        take_profit=take_profit_param,
+        stop_loss=stop_loss_param,
     )
 
     return order.to_api_request_json(exclude_none=True)

@@ -33,6 +33,7 @@ const _colorGain = Color(0xFF049B6E);
 const _colorTextSecondary = Color(0xFF7D7D7D);
 const _colorTextMain = Color(0xFFE8E8E8);
 const _colorBgElevated = Color(0xFF1F1F1F); // third background for inputs/search
+const _colorInputHighlight = Color(0xFF161616); // darker neutral highlight for key inputs
 
 // Typography (tweak here to globally affect list row sizes)
 const double _fsTitle = 16;
@@ -532,6 +533,12 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
                       watchlist: _watchlist,
                       onToggle: _toggleWatchlist,
                       liveMarkPrices: _liveMarkPrices,
+                      onMarketTap: (market, price) {
+                        final portfolioState = context.findAncestorStateOfType<_PortfolioBodyState>();
+                        if (portfolioState != null) {
+                          portfolioState._showCreateOrderDialog(market, price);
+                        }
+                      },
                     );
                   },
                   loading: () => const ListTile(title: Center(child: CircularProgressIndicator())),
@@ -558,6 +565,12 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
                       watchlist: _watchlist,
                       onToggle: _toggleWatchlist,
                       liveMarkPrices: _liveMarkPrices,
+                      onMarketTap: (market, price) {
+                        final portfolioState = context.findAncestorStateOfType<_PortfolioBodyState>();
+                        if (portfolioState != null) {
+                          portfolioState._showCreateOrderDialog(market, price);
+                        }
+                      },
                     );
                   },
                   loading: () => const ListTile(title: Center(child: CircularProgressIndicator())),
@@ -584,12 +597,14 @@ class _MarketsList extends StatelessWidget {
   final Set<String> watchlist;
   final void Function(String name, bool add) onToggle;
   final Map<String, double> liveMarkPrices;
+  final void Function(String market, double? price)? onMarketTap;
 
   const _MarketsList({
     required this.rows,
     required this.watchlist,
     required this.onToggle,
     required this.liveMarkPrices,
+    this.onMarketTap,
   });
 
   @override
@@ -637,6 +652,9 @@ class _MarketsList extends StatelessWidget {
             child: ListTile(
               dense: true,
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              onTap: onMarketTap != null
+                  ? () => onMarketTap!(r.name, livePrice ?? r.lastPrice)
+                  : null,
               leading: _MarketAvatar(symbol: r.assetName, logoUrl: logoUrl),
               title: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -732,7 +750,6 @@ class _MarketsList extends StatelessWidget {
                   ],
                 ),
               ),
-              onTap: () {},
             ),
           );
         },
@@ -772,6 +789,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
   String _positionUpdateMode = 'websocket'; // 'websocket' or 'polling'
   String _pnlPriceType = 'markPrice'; // 'markPrice' or 'midPrice'
   Timer? _positionPollingTimer;
+  bool _isClosingPosition = false; // Show loading state while market closing
 
   Future<void> _connectWallet() async {
     debugPrint('[CONNECT] Starting wallet connection...');
@@ -2289,8 +2307,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
     final size = _formatPrice(position['size']);
     final valueRaw = double.tryParse((position['value'] ?? '0').toString()) ?? 0.0;
     final value = _formatPrice(position['value']);
-    final markPriceRaw = double.tryParse((position['markPrice'] ?? '0').toString()) ?? 0.0;
-    final markPrice = _formatPrice(position['markPrice']);
+    final markPriceRaw = position['markPrice'];
+    final markPriceNumValue = double.tryParse((position['markPrice'] ?? '0').toString()) ?? 0.0;
+    final markPrice = _formatPrice(markPriceRaw);
     final entryPrice = _formatPrice(position['openPrice']);
     final leverageRaw = double.tryParse((position['leverage'] ?? '1').toString()) ?? 1.0;
     final leverage = _formatPrice(position['leverage']);
@@ -2413,24 +2432,30 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                         fontSize: 14,
                       ),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2A2A2A),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Row(
-                        children: const [
-                          Text(
-                            'Add',
-                            style: TextStyle(
-                              color: _colorTextMain,
-                              fontSize: 13,
+                    InkWell(
+                      onTap: () {
+                        Navigator.pop(context);
+                        _showAddTpSlDialog(position);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2A2A2A),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Row(
+                          children: [
+                            Text(
+                              'Add',
+                              style: TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 13,
+                              ),
                             ),
-                          ),
-                          SizedBox(width: 4),
-                          Icon(Icons.edit, size: 14, color: _colorTextMain),
-                        ],
+                            SizedBox(width: 4),
+                            Icon(Icons.edit, size: 14, color: _colorTextMain),
+                          ],
+                        ),
                       ),
                     ),
                   ],
@@ -2500,6 +2525,19 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                 ),
                               );
                               return;
+                            }
+
+                            // Show UX feedback while closing
+                            if (mounted) {
+                              setState(() {
+                                _isClosingPosition = true;
+                              });
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Market closing position...'),
+                                  duration: Duration(seconds: 2),
+                                ),
+                              );
                             }
                             
                             // Round quantity to market precision (client-side, faster)
@@ -2592,16 +2630,26 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                       // Use bidPrice for SELL, askPrice for BUY
                                       double targetPrice = isLong ? bidPrice : askPrice;
                                       
+                                      // For IOC orders, add slippage buffer to ensure immediate fill
+                                      // BUY orders: add 0.75% (multiply by 1.0075)
+                                      // SELL orders: subtract 0.75% (multiply by 0.9925)
+                                      double adjustedPrice = targetPrice;
+                                      if (closeSide == 'BUY') {
+                                        adjustedPrice = targetPrice * 1.0075;
+                                      } else {
+                                        adjustedPrice = targetPrice * 0.9925;
+                                      }
+                                      
                                       // Round price
-                                      double roundedPrice = targetPrice;
+                                      double roundedPrice = adjustedPrice;
                                       if (minPriceChange != null) {
                                         roundedPrice = ExtendedClient.roundPriceToMarketPrecision(
-                                          price: targetPrice,
+                                          price: adjustedPrice,
                                           minPriceChange: minPriceChange,
                                         );
                                       }
                                       
-                                      debugPrint('[MARKET-CLOSE] Fallback price: $targetPrice -> $roundedPrice');
+                                      debugPrint('[MARKET-CLOSE] Fallback price: $targetPrice -> $adjustedPrice (${closeSide == 'BUY' ? '+0.75%' : '-0.75%'}) -> $roundedPrice');
                                       
                                       // Try placing order with market stats price
                                       final backend = BackendClient();
@@ -2690,14 +2738,29 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                 continue;
                               }
                               
+                              // For IOC orders, add slippage buffer to ensure immediate fill
+                              // BUY orders: add 0.75% (multiply by 1.0075)
+                              // SELL orders: subtract 0.75% (multiply by 0.9925)
+                              // This matches Extended's UI market order behavior
+                              double adjustedPrice = price;
+                              if (closeSide == 'BUY') {
+                                // Buying: pay slightly more to ensure fill
+                                adjustedPrice = price * 1.0075;
+                              } else {
+                                // Selling: accept slightly less to ensure fill
+                                adjustedPrice = price * 0.9925;
+                              }
+                              
                               // Round price to market precision
-                              double roundedPrice = price;
+                              double roundedPrice = adjustedPrice;
                               if (minPriceChange != null) {
                                 roundedPrice = ExtendedClient.roundPriceToMarketPrecision(
-                                  price: price,
+                                  price: adjustedPrice,
                                   minPriceChange: minPriceChange,
                                 );
                               }
+                              
+                              debugPrint('[MARKET-CLOSE] Price adjustment: $price -> $adjustedPrice -> $roundedPrice (${closeSide == 'BUY' ? '+0.75%' : '-0.75%'})');
                               
                               // Round remaining quantity to market precision
                               double qtyToPlace = remainingQty;
@@ -2710,7 +2773,9 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                               
                               debugPrint('[MARKET-CLOSE] ┌─────────────────────────────────────┐');
                               debugPrint('[MARKET-CLOSE] │ ATTEMPT ${level + 1}/10');
-                              debugPrint('[MARKET-CLOSE] │ Price: $price -> $roundedPrice (rounded)');
+                              debugPrint('[MARKET-CLOSE] │ Orderbook Price: $price');
+                              debugPrint('[MARKET-CLOSE] │ Adjusted Price: $adjustedPrice (${closeSide == 'BUY' ? '+0.75%' : '-0.75%'})');
+                              debugPrint('[MARKET-CLOSE] │ Final Price: $roundedPrice (rounded)');
                               debugPrint('[MARKET-CLOSE] │ Available Qty: $availableQty');
                               debugPrint('[MARKET-CLOSE] │ Remaining to Close: $remainingQty');
                               debugPrint('[MARKET-CLOSE] │ Qty to Place: $qtyToPlace');
@@ -2879,11 +2944,36 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                               debugPrint('[MARKET-CLOSE] Remaining: $remainingQty');
                               debugPrint('[MARKET-CLOSE] Last error: ${lastError ?? "Unknown"}');
                               debugPrint('[MARKET-CLOSE] ========================================');
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'Failed to fully close position. Filled: $totalFilled / $roundedQty, Remaining: $remainingQty. Reason: ${lastError ?? "Unknown"}',
+                                    ),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                              }
                               throw Exception('Failed to fully close position. Filled: $totalFilled / $roundedQty, Remaining: $remainingQty. Last error: ${lastError ?? "Unknown"}');
                             } else {
                               debugPrint('[MARKET-CLOSE] ✅✅✅ POSITION FULLY CLOSED! ✅✅✅');
                               debugPrint('[MARKET-CLOSE] Total Filled: $totalFilled');
                               debugPrint('[MARKET-CLOSE] ========================================');
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Position closed successfully.'),
+                                    duration: Duration(seconds: 3),
+                                  ),
+                                );
+                              }
+                            }
+                            
+                            // Clear loading state
+                            if (mounted) {
+                              setState(() {
+                                _isClosingPosition = false;
+                              });
                             }
                             
                             // Refresh positions silently; WS will also update
@@ -3231,6 +3321,1326 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
           ],
         ),
       ),
+    );
+  }
+
+  void _showAddTpSlDialog(Map<String, dynamic> position) {
+    final market = position['market'] ?? '';
+    final sizeStr = position['size']?.toString() ?? '0';
+    final sizeNum = double.tryParse(sizeStr.replaceAll(',', '')) ?? 0.0;
+    final entryPriceStr = _formatPrice(position['openPrice']);
+    final entryPriceNum = double.tryParse(entryPriceStr.replaceAll(',', '')) ?? 0.0;
+    final leverageNum = double.tryParse((position['leverage'] ?? '1').toString()) ?? 1.0;
+    final notionalValue = entryPriceNum * sizeNum;
+    final marginUsed = leverageNum > 0 ? notionalValue / leverageNum : notionalValue;
+    final markPriceRaw = position['markPrice'];
+    final markPrice = _formatPrice(markPriceRaw);
+    final liqPriceRaw = position['liquidationPrice'];
+    final liqPriceValue = liqPriceRaw is String 
+        ? (double.tryParse(liqPriceRaw) ?? 0.0)
+        : (liqPriceRaw as num?)?.toDouble() ?? 0.0;
+    final liqPrice = (liqPriceRaw != null && liqPriceValue > 0) 
+        ? _formatPrice(liqPriceRaw) 
+        : '—';
+    
+    final positionSide = (position['side']?.toString() ?? '').toUpperCase();
+    final isLong = positionSide == 'LONG';
+    
+    // TP/SL controllers
+    final tpPriceInputController = TextEditingController();
+    final tpTargetController = TextEditingController();
+    final tpTargetModeController = ValueNotifier<String>('ROI'); // ROI or PnL
+    final tpOrderPriceTypeController = ValueNotifier<String>('Market'); // Market or Order Price
+    final tpOrderPriceController = TextEditingController();
+    final slPriceInputController = TextEditingController();
+    final slTargetController = TextEditingController();
+    final slTargetModeController = ValueNotifier<String>('PnL'); // PnL or Price
+    final slOrderPriceTypeController = ValueNotifier<String>('Market'); // Market or Order Price
+    final slOrderPriceController = TextEditingController();
+    final applicableToController = ValueNotifier<String>('Entire Position');
+    final partialPercentController = ValueNotifier<double>(0.0); // 0-100%
+    final triggerByController = ValueNotifier<String>('INDEX'); // Index, Mark, Last
+    
+    // Stored computed values
+    double? tpTriggerPriceValue;
+    double? tpPnLValue;
+    double? tpRoiValue;
+    double? slTriggerPriceValue;
+    double? slPnLValue;
+    bool _updatingTpPrice = false;
+    bool _updatingTpTarget = false;
+    bool _updatingSlPrice = false;
+    bool _updatingSlTarget = false;
+    bool tpError = false;
+    bool tpSideError = false;
+    bool slError = false;
+    bool slSideError = false;
+    bool slPositiveGain = false;
+    
+    // Default SL target to a negative marker; user can delete it.
+    slTargetController.text = slTargetController.text.isEmpty ? '-' : slTargetController.text;
+    
+    double markPriceNum() {
+      final raw = markPriceRaw;
+      if (raw == null) return 0.0;
+      if (raw is num) return raw.toDouble();
+      return double.tryParse(raw.toString().replaceAll(',', '')) ?? 0.0;
+    }
+    
+    String _fmt2(double v) => v.toStringAsFixed(2);
+    
+    double? calculatePnLFromPrice(double triggerPrice) {
+      if (entryPriceNum == 0 || sizeNum == 0) return null;
+      if (isLong) {
+        return (triggerPrice - entryPriceNum) * sizeNum;
+      } else {
+        return (entryPriceNum - triggerPrice) * sizeNum;
+      }
+    }
+    
+    double? calculatePriceFromPnL(double pnl) {
+      if (entryPriceNum == 0 || sizeNum == 0) return null;
+      if (isLong) {
+        return entryPriceNum + (pnl / sizeNum);
+      } else {
+        return entryPriceNum - (pnl / sizeNum);
+      }
+    }
+    
+    InputDecoration _inputDecoration(String hint) {
+      return InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: _colorTextSecondary),
+        filled: true,
+        fillColor: _colorBgElevated,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      );
+    }
+    
+    InputDecoration _inputDecorationHighlighted(String hint) {
+      return InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: _colorTextSecondary),
+        filled: true,
+        fillColor: _colorInputHighlight,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(4),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(4),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(4),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      );
+    }
+    
+    Widget _infoTile(String label, String value, {Color? valueColor}) {
+      return Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                color: _colorTextSecondary,
+                fontSize: 11,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: valueColor ?? _colorTextMain,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    Widget _sectionShell({required Widget child}) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: _colorBgElevated,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: child,
+      );
+    }
+    
+    void updateTpFromPrice(String value, void Function(void Function()) setState) {
+      if (_updatingTpPrice) return;
+      setState(() {
+        if (value.isEmpty) {
+          tpTriggerPriceValue = null;
+          tpPnLValue = null;
+          tpRoiValue = null;
+          tpError = false;
+          tpSideError = false;
+          _updatingTpTarget = true;
+          tpTargetController.text = '';
+          _updatingTpTarget = false;
+          return;
+        }
+        final parsed = double.tryParse(value);
+        double? price = parsed;
+        if (price != null && price < 0) {
+          price = 0;
+          _updatingTpPrice = true;
+          tpPriceInputController.text = _fmt2(price);
+          _updatingTpPrice = false;
+        }
+        tpTriggerPriceValue = price;
+        tpError = price != null && price <= 0;
+        if (price != null && markPriceNum() > 0) {
+          tpSideError = isLong ? price <= markPriceNum() : price >= markPriceNum();
+        } else {
+          tpSideError = false;
+        }
+        if (price != null) {
+          final pnl = calculatePnLFromPrice(price);
+          tpPnLValue = pnl;
+          tpRoiValue = null;
+          if (pnl != null && marginUsed > 0) {
+            tpRoiValue = pnl / marginUsed * 100;
+          }
+          if (tpTargetModeController.value == 'ROI' && tpRoiValue != null) {
+            _updatingTpTarget = true;
+            tpTargetController.text = _fmt2(tpRoiValue!);
+            _updatingTpTarget = false;
+          } else if (tpTargetModeController.value == 'PnL' && tpPnLValue != null) {
+            _updatingTpTarget = true;
+            tpTargetController.text = _fmt2(tpPnLValue!);
+            _updatingTpTarget = false;
+          }
+        }
+      });
+    }
+    
+    void updateTpFromTarget(String value, void Function(void Function()) setState) {
+      if (_updatingTpTarget) return;
+      setState(() {
+        if (value.isEmpty) {
+          tpTriggerPriceValue = null;
+          tpPnLValue = null;
+          tpRoiValue = null;
+          tpError = false;
+          tpSideError = false;
+          _updatingTpPrice = true;
+          tpPriceInputController.text = '';
+          _updatingTpPrice = false;
+          return;
+        }
+        final input = double.tryParse(value);
+        if (input == null) return;
+        if (tpTargetModeController.value == 'ROI') {
+          tpRoiValue = input;
+          tpPnLValue = marginUsed > 0 ? marginUsed * input / 100 : null;
+          if (tpPnLValue != null) tpTriggerPriceValue = calculatePriceFromPnL(tpPnLValue!);
+        } else {
+          tpPnLValue = input;
+          tpTriggerPriceValue = calculatePriceFromPnL(input);
+          tpRoiValue = marginUsed > 0
+              ? (input / marginUsed) * 100
+              : null;
+        }
+        if (tpTriggerPriceValue != null) {
+          if (tpTriggerPriceValue! < 0) {
+            tpTriggerPriceValue = 0;
+          }
+          tpError = tpTriggerPriceValue! <= 0;
+          if (markPriceNum() > 0) {
+            tpSideError = isLong ? tpTriggerPriceValue! <= markPriceNum() : tpTriggerPriceValue! >= markPriceNum();
+          } else {
+            tpSideError = false;
+          }
+          _updatingTpPrice = true;
+          tpPriceInputController.text = _fmt2(tpTriggerPriceValue!);
+          _updatingTpPrice = false;
+        }
+        tpError = tpTriggerPriceValue == null ? false : tpTriggerPriceValue! <= 0;
+        if (tpTriggerPriceValue != null && markPriceNum() > 0) {
+          tpSideError = isLong ? tpTriggerPriceValue! <= markPriceNum() : tpTriggerPriceValue! >= markPriceNum();
+        }
+      });
+    }
+    
+    void updateSlFromPrice(String value, void Function(void Function()) setState) {
+      if (_updatingSlPrice) return;
+      setState(() {
+        if (value.isEmpty) {
+          slTriggerPriceValue = null;
+          slPnLValue = null;
+          slError = false;
+          slPositiveGain = false;
+          slSideError = false;
+          _updatingSlTarget = true;
+          slTargetController.text = '';
+          _updatingSlTarget = false;
+          return;
+        }
+        final parsed = double.tryParse(value);
+        double? price = parsed;
+        if (price != null && price < 0) {
+          price = 0;
+          _updatingSlPrice = true;
+          slPriceInputController.text = _fmt2(price);
+          _updatingSlPrice = false;
+        }
+        slTriggerPriceValue = price;
+        slError = price != null && price <= 0;
+        if (price != null && markPriceNum() > 0) {
+          slSideError = isLong ? price >= markPriceNum() : price <= markPriceNum();
+        } else {
+          slSideError = false;
+        }
+        if (price != null) {
+          final pnl = calculatePnLFromPrice(price);
+          slPnLValue = pnl;
+          slPositiveGain = (pnl ?? 0) > 0;
+          if (slTargetModeController.value == 'PnL' && slPnLValue != null) {
+            _updatingSlTarget = true;
+            slTargetController.text = _fmt2(slPnLValue!);
+            _updatingSlTarget = false;
+          } else if (slTargetModeController.value == 'Price' && slTriggerPriceValue != null) {
+            _updatingSlTarget = true;
+            slTargetController.text = _fmt2(slTriggerPriceValue!);
+            _updatingSlTarget = false;
+          }
+        }
+      });
+    }
+    
+    void updateSlFromTarget(String value, void Function(void Function()) setState) {
+      if (_updatingSlTarget) return;
+      setState(() {
+        if (value.isEmpty) {
+          slTriggerPriceValue = null;
+          slPnLValue = null;
+          slError = false;
+          slPositiveGain = false;
+          slSideError = false;
+          _updatingSlPrice = true;
+          slPriceInputController.text = '';
+          _updatingSlPrice = false;
+          return;
+        }
+        final input = double.tryParse(value);
+        if (input == null) return;
+        if (slTargetModeController.value == 'PnL') {
+          slPnLValue = input;
+          slTriggerPriceValue = calculatePriceFromPnL(input);
+        } else {
+          slTriggerPriceValue = input;
+          slPnLValue = calculatePnLFromPrice(input);
+        }
+        if (slTriggerPriceValue != null) {
+          if (slTriggerPriceValue! < 0) {
+            slTriggerPriceValue = 0;
+          }
+          slError = slTriggerPriceValue! <= 0;
+          _updatingSlPrice = true;
+          slPriceInputController.text = _fmt2(slTriggerPriceValue!);
+          _updatingSlPrice = false;
+        }
+        slError = slTriggerPriceValue == null ? false : slTriggerPriceValue! <= 0;
+        slPositiveGain = (slPnLValue ?? 0) > 0;
+        if (slTriggerPriceValue != null && markPriceNum() > 0) {
+          slSideError = isLong ? slTriggerPriceValue! >= markPriceNum() : slTriggerPriceValue! <= markPriceNum();
+        } else {
+          slSideError = false;
+        }
+      });
+    }
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.65),
+      builder: (dialogContext) {
+        bool listenersAttached = false;
+        return StatefulBuilder(
+          builder: (context, setState) {
+            if (!listenersAttached) {
+              listenersAttached = true;
+              tpTargetModeController.addListener(() {
+                updateTpFromTarget(tpTargetController.text, setState);
+              });
+              slTargetModeController.addListener(() {
+                updateSlFromTarget(slTargetController.text, setState);
+              });
+            }
+            final hasTp = tpTriggerPriceValue != null || tpPnLValue != null;
+            final hasSl = slTriggerPriceValue != null || slPnLValue != null;
+            final canSubmit = hasTp || hasSl;
+            
+            return Dialog(
+              backgroundColor: Colors.transparent,
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.9,
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _colorBg,
+                    borderRadius: BorderRadius.circular(22),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.35),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text(
+                              'Add Take Profit / Stop Loss',
+                              style: TextStyle(
+                                color: _colorTextMain,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.close, color: _colorTextSecondary),
+                              onPressed: () => Navigator.of(dialogContext).pop(),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        _sectionShell(
+                          child: Row(
+                            children: [
+                              _infoTile('Order Size', sizeStr, valueColor: _colorGreenPrimary),
+                              const SizedBox(width: 12),
+                              _infoTile('Entry Price', entryPriceStr),
+                              const SizedBox(width: 12),
+                              _infoTile('Mark Price', markPrice),
+                              const SizedBox(width: 12),
+                              _infoTile('Liq. Price', liqPrice),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: _colorBgElevated,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Take Profit',
+                                style: TextStyle(
+                                  color: _colorTextMain,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  Expanded(
+                                    flex: 9,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        const Text(
+                                          'Trigger Price',
+                                          style: TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        TextField(
+                                          controller: tpPriceInputController,
+                                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                          decoration: _inputDecorationHighlighted('0.00').copyWith(
+                                            fillColor: tpError ? _colorLoss.withOpacity(0.2) : _colorInputHighlight,
+                                          ),
+                                          style: const TextStyle(color: _colorTextMain, fontSize: 16),
+                                          inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                                          onChanged: (v) => updateTpFromPrice(v, setState),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    flex: 11,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        ValueListenableBuilder<String>(
+                                          valueListenable: tpTargetModeController,
+                                          builder: (context, mode, _) {
+                                            return Text(
+                                              mode == 'ROI' ? 'ROI (%)' : 'PnL (USD)',
+                                              style: const TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                            );
+                                          },
+                                        ),
+                                    const SizedBox(height: 4),
+                                    TextField(
+                                      controller: tpTargetController,
+                                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                      decoration: _inputDecorationHighlighted('0.00').copyWith(
+                                        fillColor: tpError ? _colorLoss.withOpacity(0.2) : _colorInputHighlight,
+                                        suffixIconConstraints: const BoxConstraints(minWidth: 56, maxWidth: 56),
+                                        suffixIcon: ValueListenableBuilder<String>(
+                                          valueListenable: tpTargetModeController,
+                                          builder: (context, value, _) {
+                                            return SizedBox(
+                                              width: 56,
+                                              child: _buildDropdown(
+                                                '',
+                                                tpTargetModeController,
+                                                const ['ROI', 'PnL'],
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      style: const TextStyle(color: _colorTextMain, fontSize: 16),
+                                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                                      onChanged: (v) => updateTpFromTarget(v, setState),
+                                    ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 14),
+                              // dont remove for future: order-price UI was here
+                              const SizedBox.shrink(),
+                              const SizedBox(height: 0),
+                              ValueListenableBuilder<String>(
+                                valueListenable: triggerByController,
+                                builder: (context, triggerBy, _) {
+                                  final displayPrice = tpTriggerPriceValue?.toStringAsFixed(2) ?? '—';
+                                  final pnlValue = tpPnLValue?.toStringAsFixed(2) ?? '—';
+                                  if (tpError || tpSideError) {
+                                    final msg = tpError
+                                        ? 'Trigger price must be greater than 0.'
+                                        : isLong
+                                            ? 'Take profit must be above current mark; this would fill immediately.'
+                                            : 'Take profit must be below current mark; this would fill immediately.';
+                                    return Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        msg,
+                                        style: const TextStyle(color: _colorLoss, fontSize: 12, fontWeight: FontWeight.w600),
+                                      ),
+                                    );
+                                  }
+                                  if (tpTriggerPriceValue == null && tpPnLValue == null) return const SizedBox.shrink();
+                                  return RichText(
+                                    text: TextSpan(
+                                      style: const TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                      children: [
+                                        TextSpan(text: '$triggerBy at $displayPrice USD → market close. PnL est. '),
+                                        TextSpan(
+                                          text: '$pnlValue USD',
+                                          style: const TextStyle(color: _colorGreenPrimary, fontWeight: FontWeight.w700),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: _colorBgElevated,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Stop Loss',
+                                style: TextStyle(
+                                  color: _colorTextMain,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  Expanded(
+                                    flex: 9,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        const Text(
+                                          'Trigger Price',
+                                          style: TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        TextField(
+                                          controller: slPriceInputController,
+                                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                          decoration: _inputDecorationHighlighted('0.00').copyWith(
+                                            fillColor: slError
+                                                ? _colorLoss.withOpacity(0.2)
+                                                : slSideError
+                                                    ? _colorLoss.withOpacity(0.2)
+                                                    : slPositiveGain
+                                                    ? _colorGreenPrimary.withOpacity(0.12)
+                                                    : _colorInputHighlight,
+                                          ),
+                                          style: const TextStyle(color: _colorTextMain, fontSize: 16),
+                                          inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[-0-9.]'))],
+                                          onChanged: (v) => updateSlFromPrice(v, setState),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    flex: 11,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        ValueListenableBuilder<String>(
+                                          valueListenable: slTargetModeController,
+                                          builder: (context, mode, _) {
+                                            return Text(
+                                              mode == 'PnL' ? 'PnL (USD)' : 'Price',
+                                              style: const TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                            );
+                                          },
+                                        ),
+                                    const SizedBox(height: 4),
+                                    TextField(
+                                      controller: slTargetController,
+                                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                      decoration: _inputDecorationHighlighted('0.00').copyWith(
+                                        fillColor: slError
+                                            ? _colorLoss.withOpacity(0.2)
+                                            : slSideError
+                                                ? _colorLoss.withOpacity(0.2)
+                                                : slPositiveGain
+                                                    ? _colorGreenPrimary.withOpacity(0.12)
+                                                    : _colorInputHighlight,
+                                        suffixIconConstraints: const BoxConstraints(minWidth: 56, maxWidth: 56),
+                                        suffixIcon: ValueListenableBuilder<String>(
+                                          valueListenable: slTargetModeController,
+                                          builder: (context, _, __) {
+                                            return SizedBox(
+                                              width: 56,
+                                              child: _buildDropdown('', slTargetModeController, const ['PnL', 'Price']),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      style: const TextStyle(color: _colorTextMain, fontSize: 16),
+                                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[-0-9.]'))],
+                                      onChanged: (v) => updateSlFromTarget(v, setState),
+                                    ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 14),
+                              // dont remove for future: order-price UI was here
+                              const SizedBox.shrink(),
+                              const SizedBox(height: 0),
+                              ValueListenableBuilder<String>(
+                                valueListenable: triggerByController,
+                                builder: (context, triggerBy, _) {
+                                  final displayPrice = slTriggerPriceValue?.toStringAsFixed(2) ?? '—';
+                                  final pnlValue = slPnLValue?.toStringAsFixed(2) ?? '—';
+                                  if (slError || slSideError) {
+                                    final msg = slError
+                                        ? 'Trigger price must be greater than 0.'
+                                        : isLong
+                                            ? 'Stop loss must be below current mark.'
+                                            : 'Stop loss must be above current mark.';
+                                    return Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        msg,
+                                        style: const TextStyle(color: _colorLoss, fontSize: 12, fontWeight: FontWeight.w600),
+                                      ),
+                                    );
+                                  }
+                                  if (slTriggerPriceValue == null && slPnLValue == null) return const SizedBox.shrink();
+                                  return RichText(
+                                    text: TextSpan(
+                                      style: const TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                      children: [
+                                        TextSpan(text: '$triggerBy at $displayPrice USD → market close. PnL est. '),
+                                        TextSpan(
+                                          text: '$pnlValue USD',
+                                          style: const TextStyle(color: _colorLoss, fontWeight: FontWeight.w700),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _sectionShell(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Text(
+                                    'Applicable To',
+                                    style: TextStyle(
+                                      color: _colorTextMain,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  SizedBox(
+                                    width: 180,
+                                    child: _buildDropdown('', applicableToController, ['Entire Position', 'Partial Position']),
+                                  ),
+                                ],
+                              ),
+                              ValueListenableBuilder<String>(
+                                valueListenable: applicableToController,
+                                builder: (context, value, _) {
+                                  if (value != 'Partial Position') return const SizedBox.shrink();
+                                  return Column(
+                                    children: [
+                                      const SizedBox(height: 12),
+                                      ValueListenableBuilder<double>(
+                                        valueListenable: partialPercentController,
+                                        builder: (context, percent, _) {
+                                          final calculatedQty = sizeNum * percent / 100;
+                                          return Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                                children: [
+                                                  const Text(
+                                                    'Percentage',
+                                                    style: TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                                  ),
+                                                  Text(
+                                                    '${percent.toStringAsFixed(0)}%',
+                                                    style: const TextStyle(
+                                                      color: _colorGreenPrimary,
+                                                      fontSize: 15,
+                                                      fontWeight: FontWeight.w700,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              Slider(
+                                                value: percent,
+                                                min: 0,
+                                                max: 100,
+                                                divisions: 100,
+                                                activeColor: _colorGreenPrimary,
+                                                inactiveColor: _colorBg,
+                                                onChanged: (v) => partialPercentController.value = v,
+                                              ),
+                                              Container(
+                                                padding: const EdgeInsets.all(12),
+                                                decoration: BoxDecoration(
+                                                  color: _colorBg,
+                                                  borderRadius: BorderRadius.circular(12),
+                                                ),
+                                                child: Row(
+                                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                                  children: [
+                                                    const Text(
+                                                      'Quantity',
+                                                      style: TextStyle(color: _colorTextSecondary, fontSize: 12),
+                                                    ),
+                                                    Text(
+                                                      calculatedQty.toStringAsFixed(8).replaceAll(RegExp(r'\.?0+$'), ''),
+                                                      style: const TextStyle(
+                                                        color: _colorTextMain,
+                                                        fontSize: 14,
+                                                        fontWeight: FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                              const SizedBox(height: 12),
+                              Row(
+                                children: [
+                                  const Text(
+                                    'Trigger By',
+                                    style: TextStyle(
+                                      color: _colorTextMain,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  SizedBox(
+                                    width: 160,
+                                    child: _buildDropdown('', triggerByController, ['INDEX', 'MARK', 'LAST']),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => Navigator.of(dialogContext).pop(),
+                                style: OutlinedButton.styleFrom(
+                                  side: const BorderSide(color: Color(0xFF2A2A2A)),
+                                  padding: const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Cancel',
+                                  style: TextStyle(
+                                    color: _colorTextMain,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: ElevatedButton(
+                                onPressed: canSubmit
+                                    ? () async {
+                                        final walletAddress = _cachedWalletAddress;
+                                        if (walletAddress == null) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(
+                                              content: Text('Wallet not connected'),
+                                              backgroundColor: _colorLoss,
+                                            ),
+                                          );
+                                          return;
+                                        }
+                                        
+                                        Navigator.of(dialogContext).pop();
+                                        
+                                        try {
+                                          final backend = BackendClient();
+                                          final oppositeSide = positionSide == 'LONG' ? 'SELL' : 'BUY';
+                                          final qty = applicableToController.value == 'Partial Position'
+                                              ? (sizeNum * partialPercentController.value / 100)
+                                              : sizeNum;
+                                          final markPriceNum = double.tryParse(markPrice.replaceAll(',', '')) ?? 0.0;
+                                          
+                                          await backend.createAndPlaceOrder(
+                                            walletAddress: walletAddress,
+                                            accountIndex: 0,
+                                            market: market,
+                                            qty: qty,
+                                            price: markPriceNum > 0 ? markPriceNum : 100000,
+                                            side: oppositeSide,
+                                            reduceOnly: true,
+                                            tpSlType: 'ORDER',
+                                            takeProfitTriggerPrice: tpTriggerPriceValue,
+                                            takeProfitTriggerPriceType: triggerByController.value,
+                                            takeProfitPrice: null,
+                                            takeProfitPriceType: 'MARKET',
+                                            stopLossTriggerPrice: slTriggerPriceValue,
+                                            stopLossTriggerPriceType: triggerByController.value,
+                                            stopLossPrice: null,
+                                            stopLossPriceType: 'MARKET',
+                                          );
+                                          
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(
+                                              content: Text('TP/SL order placed successfully'),
+                                              backgroundColor: _colorGreenPrimary,
+                                            ),
+                                          );
+                                          
+                                          _fetchOrders(silent: true);
+                                          _fetchPositions(silent: true);
+                                        } catch (e) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(
+                                              content: Text('Failed to place TP/SL order: $e'),
+                                              backgroundColor: _colorLoss,
+                                            ),
+                                          );
+                                        }
+                                      }
+                                    : null,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _colorGreenPrimary,
+                                  padding: const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: Text(
+                                  'Confirm',
+                                  style: TextStyle(
+                                    color: canSubmit ? Colors.white : Colors.white70,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showCreateOrderDialog(String market, double? currentPrice) {
+    final qtyController = TextEditingController();
+    final priceController = TextEditingController(text: currentPrice?.toStringAsFixed(2) ?? '');
+    final sideController = ValueNotifier<String>('BUY');
+    
+    // TP/SL controllers
+    final enableTpSlController = ValueNotifier<bool>(false);
+    final tpTriggerController = TextEditingController();
+    final tpPriceController = TextEditingController();
+    final tpTriggerTypeController = ValueNotifier<String>('LAST');
+    final tpPriceTypeController = ValueNotifier<String>('LIMIT');
+    final slTriggerController = TextEditingController();
+    final slPriceController = TextEditingController();
+    final slTriggerTypeController = ValueNotifier<String>('LAST');
+    final slPriceTypeController = ValueNotifier<String>('LIMIT');
+    
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _colorBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      isScrollControlled: true,
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: SingleChildScrollView(
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Create Order - $market',
+                      style: const TextStyle(
+                        color: _colorTextMain,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: _colorTextSecondary),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                
+                // Side selection
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildSideButton('BUY', sideController, _colorGain),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _buildSideButton('SELL', sideController, _colorLoss),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                
+                // Quantity
+                TextField(
+                  controller: qtyController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                    labelText: 'Quantity',
+                    labelStyle: const TextStyle(color: _colorTextSecondary),
+                    filled: true,
+                    fillColor: _colorBgElevated,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  style: const TextStyle(color: _colorTextMain),
+                ),
+                const SizedBox(height: 16),
+                
+                // Price
+                TextField(
+                  controller: priceController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                    labelText: 'Price',
+                    labelStyle: const TextStyle(color: _colorTextSecondary),
+                    filled: true,
+                    fillColor: _colorBgElevated,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  style: const TextStyle(color: _colorTextMain),
+                ),
+                const SizedBox(height: 20),
+                
+                // TP/SL Toggle
+                Row(
+                  children: [
+                    ValueListenableBuilder<bool>(
+                      valueListenable: enableTpSlController,
+                      builder: (context, enabled, _) {
+                        return Switch(
+                          value: enabled,
+                          onChanged: (value) => enableTpSlController.value = value,
+                          activeColor: _colorGreenPrimary,
+                        );
+                      },
+                    ),
+                    const Text(
+                      'Enable Take Profit / Stop Loss',
+                      style: TextStyle(color: _colorTextMain, fontSize: 16),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                
+                // TP/SL Fields
+                ValueListenableBuilder<bool>(
+                  valueListenable: enableTpSlController,
+                  builder: (context, enabled, _) {
+                    if (!enabled) return const SizedBox.shrink();
+                    
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Take Profit',
+                          style: TextStyle(color: _colorTextMain, fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: tpTriggerController,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: InputDecoration(
+                            labelText: 'TP Trigger Price',
+                            labelStyle: const TextStyle(color: _colorTextSecondary),
+                            filled: true,
+                            fillColor: _colorBgElevated,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                          style: const TextStyle(color: _colorTextMain),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildDropdown('TP Trigger Type', tpTriggerTypeController, ['LAST', 'MARK', 'INDEX']),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: tpPriceController,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: InputDecoration(
+                            labelText: 'TP Execution Price',
+                            labelStyle: const TextStyle(color: _colorTextSecondary),
+                            filled: true,
+                            fillColor: _colorBgElevated,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                          style: const TextStyle(color: _colorTextMain),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildDropdown('TP Price Type', tpPriceTypeController, ['LIMIT', 'MARKET']),
+                        const SizedBox(height: 20),
+                        
+                        const Text(
+                          'Stop Loss',
+                          style: TextStyle(color: _colorTextMain, fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: slTriggerController,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: InputDecoration(
+                            labelText: 'SL Trigger Price',
+                            labelStyle: const TextStyle(color: _colorTextSecondary),
+                            filled: true,
+                            fillColor: _colorBgElevated,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                          style: const TextStyle(color: _colorTextMain),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildDropdown('SL Trigger Type', slTriggerTypeController, ['LAST', 'MARK', 'INDEX']),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: slPriceController,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: InputDecoration(
+                            labelText: 'SL Execution Price',
+                            labelStyle: const TextStyle(color: _colorTextSecondary),
+                            filled: true,
+                            fillColor: _colorBgElevated,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                          style: const TextStyle(color: _colorTextMain),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildDropdown('SL Price Type', slPriceTypeController, ['LIMIT', 'MARKET']),
+                        const SizedBox(height: 20),
+                      ],
+                    );
+                  },
+                ),
+                
+                // Submit Button
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      final qty = double.tryParse(qtyController.text);
+                      final price = double.tryParse(priceController.text);
+                      
+                      if (qty == null || qty <= 0) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Please enter a valid quantity')),
+                        );
+                        return;
+                      }
+                      
+                      if (price == null || price <= 0) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Please enter a valid price')),
+                        );
+                        return;
+                      }
+                      
+                      final walletAddress = _cachedWalletAddress;
+                      if (walletAddress == null) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Wallet not connected')),
+                        );
+                        return;
+                      }
+                      
+                      Navigator.pop(context);
+                      
+                      try {
+                        final backend = BackendClient();
+                        final tpEnabled = enableTpSlController.value;
+                        final tpTrigger = tpEnabled ? double.tryParse(tpTriggerController.text) : null;
+                        final tpPrice = tpEnabled ? double.tryParse(tpPriceController.text) : null;
+                        final slTrigger = tpEnabled ? double.tryParse(slTriggerController.text) : null;
+                        final slPrice = tpEnabled ? double.tryParse(slPriceController.text) : null;
+                        
+                        await backend.createAndPlaceOrder(
+                          walletAddress: walletAddress,
+                          accountIndex: 0,
+                          market: market,
+                          qty: qty,
+                          price: price,
+                          side: sideController.value,
+                          tpSlType: tpEnabled ? 'ORDER' : null,
+                          takeProfitTriggerPrice: tpTrigger,
+                          takeProfitTriggerPriceType: tpEnabled ? tpTriggerTypeController.value : null,
+                          takeProfitPrice: tpPrice,
+                          takeProfitPriceType: tpEnabled ? tpPriceTypeController.value : null,
+                          stopLossTriggerPrice: slTrigger,
+                          stopLossTriggerPriceType: tpEnabled ? slTriggerTypeController.value : null,
+                          stopLossPrice: slPrice,
+                          stopLossPriceType: tpEnabled ? slPriceTypeController.value : null,
+                        );
+                        
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Order placed successfully'),
+                            backgroundColor: _colorGreenPrimary,
+                          ),
+                        );
+                        
+                        // Refresh orders
+                        _fetchOrders(silent: true);
+                      } catch (e) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to place order: $e'),
+                            backgroundColor: _colorLoss,
+                          ),
+                        );
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _colorGreenPrimary,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text(
+                      'Place Order',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildSideButton(String side, ValueNotifier<String> controller, Color color) {
+    return ValueListenableBuilder<String>(
+      valueListenable: controller,
+      builder: (context, selected, _) {
+        final isSelected = selected == side;
+        return InkWell(
+          onTap: () => controller.value = side,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            decoration: BoxDecoration(
+              color: isSelected ? color.withOpacity(0.2) : _colorBgElevated,
+              border: Border.all(
+                color: isSelected ? color : Colors.transparent,
+                width: 2,
+              ),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Center(
+              child: Text(
+                side,
+                style: TextStyle(
+                  color: isSelected ? color : _colorTextSecondary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+  
+  Widget _buildDropdown(String label, ValueNotifier<String> controller, List<String> options) {
+    return ValueListenableBuilder<String>(
+      valueListenable: controller,
+      builder: (context, value, _) {
+        return PopupMenuButton<String>(
+          onSelected: (v) => controller.value = v,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  label.isEmpty ? value : '$label: $value',
+                  style: const TextStyle(color: _colorTextMain, fontSize: 14),
+                ),
+                const Icon(Icons.arrow_drop_down, color: _colorTextSecondary),
+              ],
+            ),
+          ),
+          itemBuilder: (context) => options.map((option) {
+            return PopupMenuItem<String>(
+              value: option,
+              child: Text(
+                option,
+                style: TextStyle(
+                  color: value == option ? _colorGreenPrimary : _colorTextMain,
+                  fontWeight: value == option ? FontWeight.w600 : FontWeight.normal,
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
     );
   }
 

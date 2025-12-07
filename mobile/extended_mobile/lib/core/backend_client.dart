@@ -145,9 +145,19 @@ class BackendClient {
     bool reduceOnly = false,
     String timeInForce = 'GTT',
     bool useMainnet = true,
+    // TP/SL parameters
+    String? tpSlType,
+    double? takeProfitTriggerPrice,
+    String? takeProfitTriggerPriceType,
+    double? takeProfitPrice,
+    String? takeProfitPriceType,
+    double? stopLossTriggerPrice,
+    String? stopLossTriggerPriceType,
+    double? stopLossPrice,
+    String? stopLossPriceType,
   }) async {
     // Always use backend storage - keys are stored on backend
-    final res = await _dio.post('/orders/create-and-place', data: {
+    final data = <String, dynamic>{
       'wallet_address': walletAddress,
       'account_index': accountIndex,
       'market': market,
@@ -158,7 +168,26 @@ class BackendClient {
       'reduce_only': reduceOnly,
       'time_in_force': timeInForce,
       'use_mainnet': useMainnet,
-    });
+    };
+    
+    // Add TP/SL parameters if provided
+    if (tpSlType != null) {
+      data['tp_sl_type'] = tpSlType;
+    }
+    if (takeProfitTriggerPrice != null && takeProfitPrice != null) {
+      data['take_profit_trigger_price'] = takeProfitTriggerPrice;
+      data['take_profit_trigger_price_type'] = takeProfitTriggerPriceType ?? 'LAST';
+      data['take_profit_price'] = takeProfitPrice;
+      data['take_profit_price_type'] = takeProfitPriceType ?? 'LIMIT';
+    }
+    if (stopLossTriggerPrice != null && stopLossPrice != null) {
+      data['stop_loss_trigger_price'] = stopLossTriggerPrice;
+      data['stop_loss_trigger_price_type'] = stopLossTriggerPriceType ?? 'LAST';
+      data['stop_loss_price'] = stopLossPrice;
+      data['stop_loss_price_type'] = stopLossPriceType ?? 'LIMIT';
+    }
+    
+    final res = await _dio.post('/orders/create-and-place', data: data);
     return Map<String, dynamic>.from(res.data);
   }
 

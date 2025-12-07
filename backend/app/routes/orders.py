@@ -43,6 +43,16 @@ class CreateAndPlaceOrderRequest(BaseModel):
     reduce_only: bool = False
     time_in_force: str = Field("GTT", pattern="^(GTT|IOC)$")
     use_mainnet: bool = True
+    # TP/SL parameters
+    tp_sl_type: str | None = Field(None, pattern="^(ORDER|POSITION)$", description="TPSL type: ORDER or POSITION")
+    take_profit_trigger_price: float | None = Field(None, description="Take Profit trigger price")
+    take_profit_trigger_price_type: str | None = Field(None, pattern="^(LAST|MARK|INDEX)$", description="TP trigger price type: LAST, MARK, or INDEX")
+    take_profit_price: float | None = Field(None, description="Take Profit execution price")
+    take_profit_price_type: str | None = Field(None, pattern="^(MARKET|LIMIT)$", description="TP execution price type: MARKET or LIMIT")
+    stop_loss_trigger_price: float | None = Field(None, description="Stop Loss trigger price")
+    stop_loss_trigger_price_type: str | None = Field(None, pattern="^(LAST|MARK|INDEX)$", description="SL trigger price type: LAST, MARK, or INDEX")
+    stop_loss_price: float | None = Field(None, description="Stop Loss execution price")
+    stop_loss_price_type: str | None = Field(None, pattern="^(MARKET|LIMIT)$", description="SL execution price type: MARKET or LIMIT")
 
 
 @router.post("/create-and-place")
@@ -115,6 +125,15 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
         reduce_only=payload.reduce_only,
         time_in_force=payload.time_in_force,
         use_mainnet=payload.use_mainnet,
+        tp_sl_type=payload.tp_sl_type,
+        take_profit_trigger_price=Decimal(str(payload.take_profit_trigger_price)) if payload.take_profit_trigger_price is not None else None,
+        take_profit_trigger_price_type=payload.take_profit_trigger_price_type,
+        take_profit_price=Decimal(str(payload.take_profit_price)) if payload.take_profit_price is not None else None,
+        take_profit_price_type=payload.take_profit_price_type,
+        stop_loss_trigger_price=Decimal(str(payload.stop_loss_trigger_price)) if payload.stop_loss_trigger_price is not None else None,
+        stop_loss_trigger_price_type=payload.stop_loss_trigger_price_type,
+        stop_loss_price=Decimal(str(payload.stop_loss_price)) if payload.stop_loss_price is not None else None,
+        stop_loss_price_type=payload.stop_loss_price_type,
     )
 
     # Place order via private REST
@@ -128,6 +147,12 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
     print(f"[ORDER]   Price: {payload.price}")
     print(f"[ORDER]   Reduce Only: {payload.reduce_only}")
     print(f"[ORDER]   Time In Force: {payload.time_in_force}")
+    if payload.tp_sl_type:
+        print(f"[ORDER]   TP/SL Type: {payload.tp_sl_type}")
+    if payload.take_profit_trigger_price is not None:
+        print(f"[ORDER]   Take Profit: trigger={payload.take_profit_trigger_price} ({payload.take_profit_trigger_price_type}), price={payload.take_profit_price} ({payload.take_profit_price_type})")
+    if payload.stop_loss_trigger_price is not None:
+        print(f"[ORDER]   Stop Loss: trigger={payload.stop_loss_trigger_price} ({payload.stop_loss_trigger_price_type}), price={payload.stop_loss_price} ({payload.stop_loss_price_type})")
     print(f"[ORDER] ========================================")
     
     order_response = client.post_private(record.api_key, "/user/order", json=order_json)
