@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+import httpx
 from pydantic import BaseModel, Field
 
 from ..clients.extended_rest import ExtendedRESTClient
@@ -155,7 +156,13 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
         print(f"[ORDER]   Stop Loss: trigger={payload.stop_loss_trigger_price} ({payload.stop_loss_trigger_price_type}), price={payload.stop_loss_price} ({payload.stop_loss_price_type})")
     print(f"[ORDER] ========================================")
     
-    order_response = client.post_private(record.api_key, "/user/order", json=order_json)
+    try:
+        order_response = client.post_private(record.api_key, "/user/order", json=order_json)
+    except httpx.HTTPStatusError as e:
+        # Forward Extended API errors instead of bubbling as 500
+        status = e.response.status_code
+        detail = e.response.json() if e.response else {"message": str(e)}
+        raise HTTPException(status_code=status, detail=detail)
     
     # Log order response for debugging
     print(f"[ORDER] Order placed successfully. Response: {order_response}")

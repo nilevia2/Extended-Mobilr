@@ -10,12 +10,14 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:intl/intl.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:dio/dio.dart';
 
 import 'core/extended_public_client.dart';
 import 'core/local_store.dart';
@@ -50,6 +52,8 @@ final CacheManager _logoCache = CacheManager(
     maxNrOfCacheObjects: 300,
   ),
 );
+final Map<String, Future<File>> _logoFileFutures = {};
+final Map<String, Future<Uint8List>> _logoBytesFutures = {};
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -365,11 +369,24 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
   WebSocket? _marketWebSocket;
   StreamSubscription? _marketWsSubscription;
   final Map<String, double> _liveMarkPrices = {};
+  int _initialMarketsTabIndex = 0;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 2, vsync: this, initialIndex: _initialMarketsTabIndex);
+    _tabController.addListener(() {
+      if (_tabController.indexIsChanging || !_tabController.indexIsChanging && _tabController.index == _tabController.animation?.value.round()) {
+        LocalStore.saveMarketsTabIndex(_tabController.index);
+      }
+    });
+    LocalStore.loadMarketsTabIndex().then((idx) {
+      if (!mounted) return;
+      if (idx >= 0 && idx < _tabController.length) {
+        setState(() => _initialMarketsTabIndex = idx);
+        _tabController.index = idx;
+      }
+    });
     _loadWatchlist();
     _connectMarketWebSocket();
   }
@@ -4163,7 +4180,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                     ? () async {
                                         final walletAddress = _cachedWalletAddress;
                                         if (walletAddress == null) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
+                                          ScaffoldMessenger.of(this.context).showSnackBar(
                                             const SnackBar(
                                               content: Text('Wallet not connected'),
                                               backgroundColor: _colorLoss,
@@ -4172,8 +4189,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                           return;
                                         }
                                         
+                                        final messenger = ScaffoldMessenger.of(this.context);
                                         Navigator.of(dialogContext).pop();
-                                        
                                         try {
                                           final backend = BackendClient();
                                           final oppositeSide = positionSide == 'LONG' ? 'SELL' : 'BUY';
@@ -4205,7 +4222,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                           final statusReason = orderResponse['data']?['statusReason']?.toString();
                                           if (status == 'REJECTED' || status == 'CANCELLED') {
                                             final reason = statusReason?.isNotEmpty == true ? statusReason : 'Order was $status';
-                                            ScaffoldMessenger.of(context).showSnackBar(
+                                            messenger.showSnackBar(
                                               SnackBar(
                                                 content: Text('TP/SL rejected: $reason'),
                                                 backgroundColor: _colorLoss,
@@ -4214,7 +4231,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                             return;
                                           }
                                           
-                                          ScaffoldMessenger.of(context).showSnackBar(
+                                          messenger.showSnackBar(
                                             const SnackBar(
                                               content: Text('TP/SL placed'),
                                               backgroundColor: _colorGreenPrimary,
@@ -4224,9 +4241,22 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                           _fetchOrders(silent: true);
                                           _fetchPositions(silent: true);
                                         } catch (e) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
+                                          String msg = 'Failed to place TP/SL';
+                                          if (e is DioException) {
+                                            final data = e.response?.data;
+                                            if (data is Map && data['detail'] != null) {
+                                              msg = data['detail'].toString();
+                                            } else if (data is Map && data['error'] is Map && data['error']['message'] != null) {
+                                              msg = data['error']['message'].toString();
+                                            } else if (e.message != null) {
+                                              msg = e.message!;
+                                            }
+                                          } else {
+                                            msg = e.toString();
+                                          }
+                                          messenger.showSnackBar(
                                             SnackBar(
-                                              content: Text('Failed to place TP/SL: $e'),
+                                              content: Text(msg),
                                               backgroundColor: _colorLoss,
                                             ),
                                           );
@@ -6644,16 +6674,20 @@ class _MarketAvatar extends StatelessWidget {
     final url = logoUrl;
     const size = 40.0;
     if (url == null || url.isEmpty) return CircleAvatar(child: Text(letter));
+    final future = _logoBytesFutures.putIfAbsent(url, () async {
+      final file = await _logoCache.getSingleFile(url);
+      return file.readAsBytes();
+    });
 
     return CircleAvatar(
       backgroundColor: Colors.transparent,
       radius: size / 2,
       child: ClipOval(
-        child: FutureBuilder<File>(
-          future: _logoCache.getSingleFile(url),
+        child: FutureBuilder<Uint8List>(
+          future: future,
           builder: (context, snap) {
             if (snap.hasData && snap.data != null) {
-              return SvgPicture.file(
+              return SvgPicture.memory(
                 snap.data!,
                 width: size,
                 height: size,

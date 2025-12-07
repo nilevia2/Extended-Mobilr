@@ -22,6 +22,7 @@ class LocalStore {
   static const _vaultPrefix = 'vault_for_'; // suffixed with <address>_<index>
   static const _marketPrecisionPrefix = 'market_precision_'; // suffixed with market name (e.g., BTC-USD)
   static const _marketPrecisionTimestampPrefix = 'market_precision_ts_'; // timestamp for cache expiry
+  static const _marketsTabIndexKey = 'markets_tab_index'; // 0: Markets, 1: Watchlist
   
   // Secure storage for encrypted sensitive keys
   static const _secureStorage = FlutterSecureStorage(
@@ -58,6 +59,16 @@ class LocalStore {
   static Future<void> saveWatchlist(Set<String> items) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_watchlistKey, items.toList());
+  }
+
+  static Future<void> saveMarketsTabIndex(int index) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_marketsTabIndexKey, index);
+  }
+
+  static Future<int> loadMarketsTabIndex() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_marketsTabIndexKey) ?? 0;
   }
 
   static String _apiKeyKey(String address, int index) {

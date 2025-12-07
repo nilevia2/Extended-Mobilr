@@ -171,20 +171,19 @@ class BackendClient {
     };
     
     // Add TP/SL parameters if provided
-    if (tpSlType != null) {
-      data['tp_sl_type'] = tpSlType;
-    }
-    if (takeProfitTriggerPrice != null && takeProfitPrice != null) {
+    if (tpSlType != null) data['tp_sl_type'] = tpSlType;
+    // Allow sending TP/SL with trigger only (price defaults to MARKET)
+    if (takeProfitTriggerPrice != null) {
       data['take_profit_trigger_price'] = takeProfitTriggerPrice;
       data['take_profit_trigger_price_type'] = takeProfitTriggerPriceType ?? 'LAST';
-      data['take_profit_price'] = takeProfitPrice;
-      data['take_profit_price_type'] = takeProfitPriceType ?? 'LIMIT';
+      data['take_profit_price_type'] = takeProfitPriceType ?? 'MARKET';
+      if (takeProfitPrice != null) data['take_profit_price'] = takeProfitPrice;
     }
-    if (stopLossTriggerPrice != null && stopLossPrice != null) {
+    if (stopLossTriggerPrice != null) {
       data['stop_loss_trigger_price'] = stopLossTriggerPrice;
       data['stop_loss_trigger_price_type'] = stopLossTriggerPriceType ?? 'LAST';
-      data['stop_loss_price'] = stopLossPrice;
-      data['stop_loss_price_type'] = stopLossPriceType ?? 'LIMIT';
+      data['stop_loss_price_type'] = stopLossPriceType ?? 'MARKET';
+      if (stopLossPrice != null) data['stop_loss_price'] = stopLossPrice;
     }
     
     final res = await _dio.post('/orders/create-and-place', data: data);
