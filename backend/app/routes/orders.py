@@ -232,12 +232,12 @@ class AddTpslRequest(BaseModel):
 def add_tpsl_to_position(payload: AddTpslRequest):
     """
     Add TP/SL orders to an existing position.
-    This creates reduce-only orders that will close the position when triggered.
+    This creates reduce-only TPSL-type orders that monitor the position directly.
     """
     # Lazy import to avoid failing on Python<3.10 during app import
     try:
         from decimal import Decimal
-        from ..services.order_signing import build_signed_limit_order_json  # type: ignore
+        from ..services.order_signing import build_signed_tpsl_position_order_json  # type: ignore
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -288,7 +288,14 @@ def add_tpsl_to_position(payload: AddTpslRequest):
             detail="Vault ID is required but not available. Please ensure API key issuance completed successfully."
         )
 
-    # Build TP/SL parameters
+    # Validate at least one TPSL leg is provided
+    if payload.take_profit_trigger_price is None and payload.stop_loss_trigger_price is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of take_profit_trigger_price or stop_loss_trigger_price must be provided"
+        )
+
+    # Build TP/SL parameters with defaults
     take_profit_price = payload.take_profit_price
     take_profit_price_type = payload.take_profit_price_type
     stop_loss_price = payload.stop_loss_price
@@ -296,50 +303,32 @@ def add_tpsl_to_position(payload: AddTpslRequest):
     tp_trigger_type = payload.take_profit_trigger_price_type
     sl_trigger_type = payload.stop_loss_trigger_price_type
 
-    # Extended SDK does NOT support TPSL price_type MARKET; default to LIMIT at the trigger.
+    # Set defaults if not provided
     if payload.take_profit_trigger_price is not None:
         if take_profit_price is None:
             take_profit_price = payload.take_profit_trigger_price
-        if take_profit_price_type is None or take_profit_price_type == "MARKET":
+        if take_profit_price_type is None:
             take_profit_price_type = "LIMIT"
         if tp_trigger_type is None:
             tp_trigger_type = "LAST"
+
     if payload.stop_loss_trigger_price is not None:
         if stop_loss_price is None:
             stop_loss_price = payload.stop_loss_trigger_price
-        if stop_loss_price_type is None or stop_loss_price_type == "MARKET":
+        if stop_loss_price_type is None:
             stop_loss_price_type = "LIMIT"
         if sl_trigger_type is None:
             sl_trigger_type = "LAST"
 
-    # If only one leg is provided, drop tp_sl_type (SDK/Extended can be picky)
-    legs_count = sum(1 for v in [payload.take_profit_trigger_price, payload.stop_loss_trigger_price] if v is not None)
-    tp_sl_type = payload.tp_sl_type if legs_count == 2 else None
-
-    # For TPSL orders, use the trigger price as the order price to avoid immediate fills
-    # Choose TP trigger if available, else SL trigger
-    order_price = payload.take_profit_trigger_price if payload.take_profit_trigger_price is not None else payload.stop_loss_trigger_price
-
-    if order_price is None:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of take_profit_trigger_price or stop_loss_trigger_price must be provided"
-        )
-
-    order_json = build_signed_limit_order_json(
+    # Create position-level TPSL order (type="TPSL", tpSlType="POSITION")
+    order_json = build_signed_tpsl_position_order_json(
         api_key=record.api_key,
         stark_private_key_hex=record.stark_private_key,
         stark_public_key_hex=record.stark_public_key,
         vault=int(vault),
         market=payload.market,
-        qty=Decimal(str(payload.qty)),
-        price=Decimal(str(order_price)),
         side=payload.side,
-        post_only=False,
-        reduce_only=True,  # Always reduce-only for TPSL on existing positions
-        time_in_force="GTT",
         use_mainnet=payload.use_mainnet,
-        tp_sl_type=tp_sl_type,
         take_profit_trigger_price=Decimal(str(payload.take_profit_trigger_price)) if payload.take_profit_trigger_price is not None else None,
         take_profit_trigger_price_type=tp_trigger_type,
         take_profit_price=Decimal(str(take_profit_price)) if take_profit_price is not None else None,
@@ -357,17 +346,14 @@ def add_tpsl_to_position(payload: AddTpslRequest):
     client = ExtendedRESTClient(get_endpoint_config("mainnet" if payload.use_mainnet else "testnet"))
 
     print(f"[TPSL] ========================================")
-    print(f"[TPSL] Adding TP/SL to position:")
+    print(f"[TPSL] Adding position-level TP/SL:")
     print(f"[TPSL]   Market: {payload.market}")
-    print(f"[TPSL]   Side: {payload.side}")
-    print(f"[TPSL]   Qty: {payload.qty}")
-    print(f"[TPSL]   Order Price: {order_price}")
-    if payload.tp_sl_type:
-        print(f"[TPSL]   TP/SL Type: {payload.tp_sl_type}")
+    print(f"[TPSL]   Position Side: {payload.side}")
+    print(f"[TPSL]   Type: TPSL (POSITION-level)")
     if payload.take_profit_trigger_price is not None:
-        print(f"[TPSL]   Take Profit: trigger={payload.take_profit_trigger_price} ({tp_trigger_type}), price={take_profit_price} ({take_profit_price_type})")
+        print(f"[TPSL]   Take Profit: trigger={payload.take_profit_trigger_price} ({tp_trigger_type}), exec={take_profit_price} ({take_profit_price_type})")
     if payload.stop_loss_trigger_price is not None:
-        print(f"[TPSL]   Stop Loss: trigger={payload.stop_loss_trigger_price} ({sl_trigger_type}), price={stop_loss_price} ({stop_loss_price_type})")
+        print(f"[TPSL]   Stop Loss: trigger={payload.stop_loss_trigger_price} ({sl_trigger_type}), exec={stop_loss_price} ({stop_loss_price_type})")
     print(f"[TPSL] ========================================")
 
     try:
