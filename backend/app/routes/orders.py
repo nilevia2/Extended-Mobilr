@@ -137,8 +137,9 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
         if sl_trigger_type is None:
             sl_trigger_type = "LAST"
 
-    # If neither TP nor SL provided, drop tp_sl_type to avoid API rejection
-    tp_sl_type = payload.tp_sl_type if (payload.take_profit_trigger_price is not None or payload.stop_loss_trigger_price is not None) else None
+    # If only one leg is provided, drop tp_sl_type (SDK/Extended can be picky)
+    legs_count = sum(1 for v in [payload.take_profit_trigger_price, payload.stop_loss_trigger_price] if v is not None)
+    tp_sl_type = payload.tp_sl_type if legs_count == 2 else None
 
     order_json = build_signed_limit_order_json(
         api_key=record.api_key,
@@ -192,6 +193,7 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
         # Forward Extended API errors instead of bubbling as 500
         status = e.response.status_code
         detail = e.response.json() if e.response else {"message": str(e)}
+        print(f"[ORDER] ERROR from Extended: status={status} detail={detail}")
         raise HTTPException(status_code=status, detail=detail)
     
     # Log order response for debugging
