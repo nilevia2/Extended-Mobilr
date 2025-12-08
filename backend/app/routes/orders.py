@@ -141,6 +141,13 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
     legs_count = sum(1 for v in [payload.take_profit_trigger_price, payload.stop_loss_trigger_price] if v is not None)
     tp_sl_type = payload.tp_sl_type if legs_count == 2 else None
 
+    # Ensure primary order price follows the TP/SL leg to avoid unintended immediate fills
+    primary_price = payload.price
+    if payload.take_profit_trigger_price is not None:
+        primary_price = payload.take_profit_trigger_price
+    elif payload.stop_loss_trigger_price is not None:
+        primary_price = payload.stop_loss_trigger_price
+
     order_json = build_signed_limit_order_json(
         api_key=record.api_key,
         stark_private_key_hex=record.stark_private_key,
@@ -148,7 +155,7 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
         vault=int(vault),
         market=payload.market,
         qty=Decimal(str(payload.qty)),
-        price=Decimal(str(payload.price)),
+        price=Decimal(str(primary_price)),
         side=payload.side,
         post_only=payload.post_only,
         reduce_only=payload.reduce_only,

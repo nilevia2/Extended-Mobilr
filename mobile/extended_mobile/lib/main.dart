@@ -3861,6 +3861,8 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                               ValueListenableBuilder<String>(
                                 valueListenable: triggerByController,
                                 builder: (context, triggerBy, _) {
+                                  // Persist trigger selection
+                                  LocalStore.saveTpSlTriggerType(triggerBy);
                                   final displayPrice = tpTriggerPriceValue?.toStringAsFixed(2) ?? '—';
                                   final pnlValue = tpPnLValue?.toStringAsFixed(2) ?? '—';
                                   if (tpError || tpSideError) {
@@ -4198,24 +4200,29 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                               ? (sizeNum * partialPercentController.value / 100)
                                               : sizeNum;
                                           final markPriceNum = double.tryParse(markPrice.replaceAll(',', '')) ?? 0.0;
+                                          // Use TP/SL trigger as main price to avoid immediate fill; fallback to mark
+                                          final selectedPrice = tpTriggerPriceValue ??
+                                              slTriggerPriceValue ??
+                                              (markPriceNum > 0 ? markPriceNum : 100000);
                                           
+                                          debugPrint('[TPSL] side=$positionSide opp=$oppositeSide qty=$qty mark=$markPriceNum tp=$tpTriggerPriceValue sl=$slTriggerPriceValue triggerBy=${triggerByController.value}');
                                           final orderResponse = await backend.createAndPlaceOrder(
                                             walletAddress: walletAddress,
                                             accountIndex: 0,
                                             market: market,
                                             qty: qty,
-                                            price: markPriceNum > 0 ? markPriceNum : 100000,
+                                            price: selectedPrice,
                                             side: oppositeSide,
                                             reduceOnly: true,
                                             tpSlType: 'ORDER',
                                             takeProfitTriggerPrice: tpTriggerPriceValue,
                                             takeProfitTriggerPriceType: triggerByController.value,
-                                            takeProfitPrice: null,
-                                            takeProfitPriceType: 'MARKET',
+                                          takeProfitPrice: tpTriggerPriceValue,
+                                          takeProfitPriceType: 'LIMIT',
                                             stopLossTriggerPrice: slTriggerPriceValue,
                                             stopLossTriggerPriceType: triggerByController.value,
-                                            stopLossPrice: null,
-                                            stopLossPriceType: 'MARKET',
+                                          stopLossPrice: slTriggerPriceValue,
+                                          stopLossPriceType: 'LIMIT',
                                           );
                                           
                                           final status = orderResponse['data']?['status']?.toString().toUpperCase();
