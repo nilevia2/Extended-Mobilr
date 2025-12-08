@@ -42,6 +42,7 @@ try:
         OrderTpslType,
         TimeInForce,
     )
+    from x10.perpetual.fees import DEFAULT_FEES  # type: ignore
 except ImportError as e:
     raise ImportError(
         f"Failed to import from vendored SDK at {VENDOR_SDK_PATH}. "
