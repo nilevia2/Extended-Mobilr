@@ -54,6 +54,13 @@ except ImportError as e:
 
 from ..config import get_endpoint_config
 
+# Import additional required types for TPSL orders
+try:
+    from x10.utils.date import to_epoch_millis, utc_now  # type: ignore
+    from x10.utils.nonce import generate_nonce  # type: ignore
+except ImportError:
+    pass
+
 # Cache for market models (key: market_name, value: (market_model, expiry_time))
 _market_cache: Dict[str, tuple[MarketModel, datetime]] = {}
 _CACHE_TTL_MINUTES = 10  # Cache market data for 10 minutes
@@ -207,5 +214,173 @@ def build_signed_limit_order_json(
     )
 
     return order.to_api_request_json(exclude_none=True)
+
+
+def build_signed_tpsl_position_order_json(
+    *,
+    api_key: str,
+    stark_private_key_hex: str,
+    stark_public_key_hex: str,
+    vault: int,
+    market: str,
+    side: str,
+    use_mainnet: bool = True,
+    take_profit_trigger_price: Optional[Decimal] = None,
+    take_profit_trigger_price_type: Optional[str] = None,
+    take_profit_price: Optional[Decimal] = None,
+    take_profit_price_type: Optional[str] = None,
+    stop_loss_trigger_price: Optional[Decimal] = None,
+    stop_loss_trigger_price_type: Optional[str] = None,
+    stop_loss_price: Optional[Decimal] = None,
+    stop_loss_price_type: Optional[str] = None,
+) -> Dict:
+    """
+    Creates a position-level TPSL order (type: "TPSL", tpSlType: "POSITION").
+    This monitors the position directly, not attached to a specific order.
+    Returns JSON ready for POST /user/order
+    """
+    from x10.utils.date import to_epoch_millis, utc_now  # type: ignore
+    from x10.utils.nonce import generate_nonce  # type: ignore
+    from x10.perpetual.order_object_settlement import (  # type: ignore
+        SettlementDataCtx,
+        create_order_settlement_data,
+    )
+
+    side_enum = OrderSide(side)  # validates
+    env_cfg = get_endpoint_config("mainnet" if use_mainnet else "testnet")
+    x10_env_cfg = _get_env_config(use_mainnet)
+
+    market_model = _fetch_market_model(env_cfg.api_base_url, market)
+
+    account = StarkPerpetualAccount(
+        vault=vault,
+        private_key=stark_private_key_hex,
+        public_key=stark_public_key_hex,
+        api_key=api_key,
+    )
+
+    # For position-level TPSL, we use qty=0 and price=0
+    # The actual position size is monitored automatically
+    qty = Decimal("0")
+    price = Decimal("0")
+
+    # Generate nonce and expiry
+    nonce = generate_nonce()
+    expire_time = utc_now() + timedelta(hours=2160)  # 90 days
+
+    fees = account.trading_fee.get(market_model.name, DEFAULT_FEES)
+
+    # Create settlement data for the main TPSL order (qty=0, price=0)
+    settlement_data_ctx = SettlementDataCtx(
+        market=market_model,
+        fees=fees,
+        builder_fee=None,
+        nonce=nonce,
+        collateral_position_id=vault,
+        expire_time=expire_time,
+        signer=account.sign,
+        public_key=account.public_key,
+        starknet_domain=x10_env_cfg.starknet_domain,
+    )
+
+    # Main order settlement (qty=0, price=0 for position-level TPSL)
+    main_settlement = create_order_settlement_data(
+        side=side_enum,
+        synthetic_amount=qty,
+        price=price,
+        ctx=settlement_data_ctx,
+    )
+
+    # Build order JSON manually (SDK doesn't support type="TPSL")
+    order_json = {
+        "id": str(main_settlement.order_hash),
+        "market": market_model.name,
+        "type": "TPSL",  # Key difference from SDK
+        "side": side.upper(),
+        "qty": "0",  # Position-level TPSL uses 0
+        "price": "0",  # Position-level TPSL uses 0
+        "reduceOnly": True,
+        "postOnly": False,
+        "timeInForce": "GTT",
+        "expiryEpochMillis": to_epoch_millis(expire_time),
+        "fee": str(fees.taker_fee_rate),
+        "nonce": str(nonce),
+        "settlement": main_settlement.settlement,
+        "selfTradeProtectionLevel": "ACCOUNT",
+        "tpSlType": "POSITION",  # Monitor position, not order
+        "debuggingAmounts": main_settlement.debugging_amounts,
+    }
+
+    # Add Take Profit if provided
+    if take_profit_trigger_price is not None:
+        if take_profit_trigger_price_type is None:
+            take_profit_trigger_price_type = "LAST"
+        if take_profit_price_type is None:
+            take_profit_price_type = "LIMIT"
+        if take_profit_price is None:
+            take_profit_price = take_profit_trigger_price
+
+        # Round prices
+        rounded_tp_trigger = market_model.trading_config.round_price(take_profit_trigger_price)
+        rounded_tp_price = market_model.trading_config.round_price(take_profit_price)
+
+        # Get opposite side for TP/SL
+        tp_side = OrderSide.BUY if side_enum == OrderSide.SELL else OrderSide.SELL
+
+        # Create settlement for TP
+        tp_settlement = create_order_settlement_data(
+            side=tp_side,
+            synthetic_amount=Decimal("0"),  # Position-level uses 0
+            price=rounded_tp_price,
+            ctx=settlement_data_ctx,
+        )
+
+        order_json["takeProfit"] = {
+            "triggerPrice": str(rounded_tp_trigger),
+            "triggerPriceType": take_profit_trigger_price_type.upper(),
+            "price": str(rounded_tp_price),
+            "priceType": take_profit_price_type.upper(),
+            "settlement": tp_settlement.settlement,
+            "debuggingAmounts": tp_settlement.debugging_amounts,
+        }
+
+        print(f"[ORDER-SIGNING] Take Profit: trigger={rounded_tp_trigger} ({take_profit_trigger_price_type}), price={rounded_tp_price} ({take_profit_price_type})")
+
+    # Add Stop Loss if provided
+    if stop_loss_trigger_price is not None:
+        if stop_loss_trigger_price_type is None:
+            stop_loss_trigger_price_type = "LAST"
+        if stop_loss_price_type is None:
+            stop_loss_price_type = "LIMIT"
+        if stop_loss_price is None:
+            stop_loss_price = stop_loss_trigger_price
+
+        # Round prices
+        rounded_sl_trigger = market_model.trading_config.round_price(stop_loss_trigger_price)
+        rounded_sl_price = market_model.trading_config.round_price(stop_loss_price)
+
+        # Get opposite side for TP/SL
+        sl_side = OrderSide.BUY if side_enum == OrderSide.SELL else OrderSide.SELL
+
+        # Create settlement for SL
+        sl_settlement = create_order_settlement_data(
+            side=sl_side,
+            synthetic_amount=Decimal("0"),  # Position-level uses 0
+            price=rounded_sl_price,
+            ctx=settlement_data_ctx,
+        )
+
+        order_json["stopLoss"] = {
+            "triggerPrice": str(rounded_sl_trigger),
+            "triggerPriceType": stop_loss_trigger_price_type.upper(),
+            "price": str(rounded_sl_price),
+            "priceType": stop_loss_price_type.upper(),
+            "settlement": sl_settlement.settlement,
+            "debuggingAmounts": sl_settlement.debugging_amounts,
+        }
+
+        print(f"[ORDER-SIGNING] Stop Loss: trigger={rounded_sl_trigger} ({stop_loss_trigger_price_type}), price={rounded_sl_price} ({stop_loss_price_type})")
+
+    return order_json
 
 
