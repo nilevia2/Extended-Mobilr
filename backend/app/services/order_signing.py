@@ -293,6 +293,7 @@ def build_signed_tpsl_position_order_json(
     )
 
     # Build order JSON manually (SDK doesn't support type="TPSL")
+    # Convert settlement models to JSON-serializable format
     order_json = {
         "id": str(main_settlement.order_hash),
         "market": market_model.name,
@@ -306,10 +307,21 @@ def build_signed_tpsl_position_order_json(
         "expiryEpochMillis": to_epoch_millis(expire_time),
         "fee": str(fees.taker_fee_rate),
         "nonce": str(nonce),
-        "settlement": main_settlement.settlement,
+        "settlement": {
+            "signature": {
+                "r": hex(main_settlement.settlement.signature.r),
+                "s": hex(main_settlement.settlement.signature.s),
+            },
+            "starkKey": hex(main_settlement.settlement.stark_key),
+            "collateralPosition": str(main_settlement.settlement.collateral_position),
+        },
         "selfTradeProtectionLevel": "ACCOUNT",
         "tpSlType": "POSITION",  # Monitor position, not order
-        "debuggingAmounts": main_settlement.debugging_amounts,
+        "debuggingAmounts": {
+            "collateralAmount": str(main_settlement.debugging_amounts.collateral_amount),
+            "feeAmount": str(main_settlement.debugging_amounts.fee_amount),
+            "syntheticAmount": str(main_settlement.debugging_amounts.synthetic_amount),
+        },
     }
 
     # Add Take Profit if provided
@@ -341,8 +353,19 @@ def build_signed_tpsl_position_order_json(
             "triggerPriceType": take_profit_trigger_price_type.upper(),
             "price": str(rounded_tp_price),
             "priceType": take_profit_price_type.upper(),
-            "settlement": tp_settlement.settlement,
-            "debuggingAmounts": tp_settlement.debugging_amounts,
+            "settlement": {
+                "signature": {
+                    "r": hex(tp_settlement.settlement.signature.r),
+                    "s": hex(tp_settlement.settlement.signature.s),
+                },
+                "starkKey": hex(tp_settlement.settlement.stark_key),
+                "collateralPosition": str(tp_settlement.settlement.collateral_position),
+            },
+            "debuggingAmounts": {
+                "collateralAmount": str(tp_settlement.debugging_amounts.collateral_amount),
+                "feeAmount": str(tp_settlement.debugging_amounts.fee_amount),
+                "syntheticAmount": str(tp_settlement.debugging_amounts.synthetic_amount),
+            },
         }
 
         print(f"[ORDER-SIGNING] Take Profit: trigger={rounded_tp_trigger} ({take_profit_trigger_price_type}), price={rounded_tp_price} ({take_profit_price_type})")
@@ -376,8 +399,19 @@ def build_signed_tpsl_position_order_json(
             "triggerPriceType": stop_loss_trigger_price_type.upper(),
             "price": str(rounded_sl_price),
             "priceType": stop_loss_price_type.upper(),
-            "settlement": sl_settlement.settlement,
-            "debuggingAmounts": sl_settlement.debugging_amounts,
+            "settlement": {
+                "signature": {
+                    "r": hex(sl_settlement.settlement.signature.r),
+                    "s": hex(sl_settlement.settlement.signature.s),
+                },
+                "starkKey": hex(sl_settlement.settlement.stark_key),
+                "collateralPosition": str(sl_settlement.settlement.collateral_position),
+            },
+            "debuggingAmounts": {
+                "collateralAmount": str(sl_settlement.debugging_amounts.collateral_amount),
+                "feeAmount": str(sl_settlement.debugging_amounts.fee_amount),
+                "syntheticAmount": str(sl_settlement.debugging_amounts.synthetic_amount),
+            },
         }
 
         print(f"[ORDER-SIGNING] Stop Loss: trigger={rounded_sl_trigger} ({stop_loss_trigger_price_type}), price={rounded_sl_price} ({stop_loss_price_type})")
