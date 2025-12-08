@@ -4811,7 +4811,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                   _buildDetailRow('Trigger Price', '—'),
                 ],
                 const SizedBox(height: 10),
-                _buildDetailRow('Order Price', '\$$price'),
+                _buildDetailRow('Order Price', price == '0' ? '\$0' : '\$$price'),
                 const SizedBox(height: 10),
                 _buildDetailRow('Order Size', '$qty ${market.split('-')[0]}'),
                 const SizedBox(height: 10),
