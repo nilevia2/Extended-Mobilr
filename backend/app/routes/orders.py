@@ -118,17 +118,23 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
     take_profit_price_type = payload.take_profit_price_type
     stop_loss_price = payload.stop_loss_price
     stop_loss_price_type = payload.stop_loss_price_type
+    tp_trigger_type = payload.take_profit_trigger_price_type
+    sl_trigger_type = payload.stop_loss_trigger_price_type
 
     if payload.take_profit_trigger_price is not None:
         if take_profit_price is None:
             take_profit_price = payload.take_profit_trigger_price
         if take_profit_price_type is None:
             take_profit_price_type = "MARKET"
+        if tp_trigger_type is None:
+            tp_trigger_type = "LAST"
     if payload.stop_loss_trigger_price is not None:
         if stop_loss_price is None:
             stop_loss_price = payload.stop_loss_trigger_price
         if stop_loss_price_type is None:
             stop_loss_price_type = "MARKET"
+        if sl_trigger_type is None:
+            sl_trigger_type = "LAST"
 
     # If neither TP nor SL provided, drop tp_sl_type to avoid API rejection
     tp_sl_type = payload.tp_sl_type if (payload.take_profit_trigger_price is not None or payload.stop_loss_trigger_price is not None) else None
@@ -148,11 +154,11 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
         use_mainnet=payload.use_mainnet,
         tp_sl_type=tp_sl_type,
         take_profit_trigger_price=Decimal(str(payload.take_profit_trigger_price)) if payload.take_profit_trigger_price is not None else None,
-        take_profit_trigger_price_type=payload.take_profit_trigger_price_type,
+        take_profit_trigger_price_type=tp_trigger_type,
         take_profit_price=Decimal(str(take_profit_price)) if take_profit_price is not None else None,
         take_profit_price_type=take_profit_price_type,
         stop_loss_trigger_price=Decimal(str(payload.stop_loss_trigger_price)) if payload.stop_loss_trigger_price is not None else None,
-        stop_loss_trigger_price_type=payload.stop_loss_trigger_price_type,
+        stop_loss_trigger_price_type=sl_trigger_type,
         stop_loss_price=Decimal(str(stop_loss_price)) if stop_loss_price is not None else None,
         stop_loss_price_type=stop_loss_price_type,
     )
@@ -180,7 +186,7 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
     print(f"[ORDER] ========================================")
     
     try:
-    order_response = client.post_private(record.api_key, "/user/order", json=order_json)
+        order_response = client.post_private(record.api_key, "/user/order", json=order_json)
     except httpx.HTTPStatusError as e:
         # Forward Extended API errors instead of bubbling as 500
         status = e.response.status_code
