@@ -121,18 +121,19 @@ def create_and_place_order(payload: CreateAndPlaceOrderRequest):
     tp_trigger_type = payload.take_profit_trigger_price_type
     sl_trigger_type = payload.stop_loss_trigger_price_type
 
+    # Extended SDK does NOT support TPSL price_type MARKET; default to LIMIT at the trigger.
     if payload.take_profit_trigger_price is not None:
         if take_profit_price is None:
             take_profit_price = payload.take_profit_trigger_price
-        if take_profit_price_type is None:
-            take_profit_price_type = "MARKET"
+        if take_profit_price_type is None or take_profit_price_type == "MARKET":
+            take_profit_price_type = "LIMIT"
         if tp_trigger_type is None:
             tp_trigger_type = "LAST"
     if payload.stop_loss_trigger_price is not None:
         if stop_loss_price is None:
             stop_loss_price = payload.stop_loss_trigger_price
-        if stop_loss_price_type is None:
-            stop_loss_price_type = "MARKET"
+        if stop_loss_price_type is None or stop_loss_price_type == "MARKET":
+            stop_loss_price_type = "LIMIT"
         if sl_trigger_type is None:
             sl_trigger_type = "LAST"
 
