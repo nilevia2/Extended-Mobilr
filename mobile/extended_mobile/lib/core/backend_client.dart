@@ -271,6 +271,52 @@ class BackendClient {
     });
     return Map<String, dynamic>.from(res.data);
   }
+
+  Future<Map<String, dynamic>> addTpslToPosition({
+    required String walletAddress,
+    required int accountIndex,
+    required String market,
+    required num qty,
+    required String side,
+    bool useMainnet = true,
+    // TP/SL parameters
+    String? tpSlType,
+    double? takeProfitTriggerPrice,
+    String? takeProfitTriggerPriceType,
+    double? takeProfitPrice,
+    String? takeProfitPriceType,
+    double? stopLossTriggerPrice,
+    String? stopLossTriggerPriceType,
+    double? stopLossPrice,
+    String? stopLossPriceType,
+  }) async {
+    final data = <String, dynamic>{
+      'wallet_address': walletAddress,
+      'account_index': accountIndex,
+      'market': market,
+      'qty': qty,
+      'side': side,
+      'use_mainnet': useMainnet,
+    };
+
+    // Add TP/SL parameters if provided
+    if (tpSlType != null) data['tp_sl_type'] = tpSlType;
+    if (takeProfitTriggerPrice != null) {
+      data['take_profit_trigger_price'] = takeProfitTriggerPrice;
+      data['take_profit_trigger_price_type'] = takeProfitTriggerPriceType ?? 'LAST';
+      data['take_profit_price_type'] = takeProfitPriceType ?? 'MARKET';
+      if (takeProfitPrice != null) data['take_profit_price'] = takeProfitPrice;
+    }
+    if (stopLossTriggerPrice != null) {
+      data['stop_loss_trigger_price'] = stopLossTriggerPrice;
+      data['stop_loss_trigger_price_type'] = stopLossTriggerPriceType ?? 'LAST';
+      data['stop_loss_price_type'] = stopLossPriceType ?? 'MARKET';
+      if (stopLossPrice != null) data['stop_loss_price'] = stopLossPrice;
+    }
+
+    final res = await _dio.post('/orders/add-tpsl', data: data);
+    return Map<String, dynamic>.from(res.data);
+  }
 }
 
 

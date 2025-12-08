@@ -4199,30 +4199,23 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
                                           final qty = applicableToController.value == 'Partial Position'
                                               ? (sizeNum * partialPercentController.value / 100)
                                               : sizeNum;
-                                          final markPriceNum = double.tryParse(markPrice.replaceAll(',', '')) ?? 0.0;
-                                          // Use TP/SL trigger as main price to avoid immediate fill; fallback to mark
-                                          final selectedPrice = tpTriggerPriceValue ??
-                                              slTriggerPriceValue ??
-                                              (markPriceNum > 0 ? markPriceNum : 100000);
-                                          
-                                          debugPrint('[TPSL] side=$positionSide opp=$oppositeSide qty=$qty mark=$markPriceNum tp=$tpTriggerPriceValue sl=$slTriggerPriceValue triggerBy=${triggerByController.value}');
-                                          final orderResponse = await backend.createAndPlaceOrder(
+
+                                          debugPrint('[TPSL] side=$positionSide opp=$oppositeSide qty=$qty tp=$tpTriggerPriceValue sl=$slTriggerPriceValue triggerBy=${triggerByController.value}');
+                                          final orderResponse = await backend.addTpslToPosition(
                                             walletAddress: walletAddress,
                                             accountIndex: 0,
                                             market: market,
                                             qty: qty,
-                                            price: selectedPrice,
                                             side: oppositeSide,
-                                            reduceOnly: true,
                                             tpSlType: 'ORDER',
                                             takeProfitTriggerPrice: tpTriggerPriceValue,
                                             takeProfitTriggerPriceType: triggerByController.value,
-                                          takeProfitPrice: tpTriggerPriceValue,
-                                          takeProfitPriceType: 'LIMIT',
+                                            takeProfitPrice: tpTriggerPriceValue,
+                                            takeProfitPriceType: 'LIMIT',
                                             stopLossTriggerPrice: slTriggerPriceValue,
                                             stopLossTriggerPriceType: triggerByController.value,
-                                          stopLossPrice: slTriggerPriceValue,
-                                          stopLossPriceType: 'LIMIT',
+                                            stopLossPrice: slTriggerPriceValue,
+                                            stopLossPriceType: 'LIMIT',
                                           );
                                           
                                           final status = orderResponse['data']?['status']?.toString().toUpperCase();
