@@ -90,12 +90,6 @@ class MarketRow {
       return double.tryParse(v.toString()) ?? 0.0;
     }
 
-    int? parseInt(dynamic v) {
-      if (v == null) return null;
-      if (v is num) return v.toInt();
-      return int.tryParse(v.toString());
-    }
-
     return MarketRow(
       name: j['name'] ?? '',
       assetName: asset,

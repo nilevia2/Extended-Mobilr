@@ -5,11 +5,14 @@ import 'package:flutter/foundation.dart';
 import 'dart:ui';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:intl/intl.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -57,6 +60,7 @@ final CacheManager _logoCache = CacheManager(
     maxNrOfCacheObjects: 300,
   ),
 );
+final Map<String, Future<File>> _logoFileFutures = {};
 final Map<String, Future<Uint8List>> _logoBytesFutures = {};
 
 Future<void> main() async {

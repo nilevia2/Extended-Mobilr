@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'config.dart';
 import 'local_store.dart';
-import 'extended_client.dart';
 
 class BackendClient {
   final Dio _dio = Dio(BaseOptions(
