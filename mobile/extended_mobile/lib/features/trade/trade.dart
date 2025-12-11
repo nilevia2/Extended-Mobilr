@@ -14,13 +14,15 @@ class _TradePageState extends ConsumerState<TradePage> {
   int _candleMsgCount = 0;
   int _candleReconnectAttempts = 0;
   String _candleDebug = '';
-  int _candleRenderVersion = 0;
   bool _candleReconnecting = false;
   int _candleSession = 0; // Increment to invalidate old sockets when switching
   WebSocket? _markPriceSocket;
   StreamSubscription? _markPriceSub;
   Timer? _markPriceReconnectTimer;
   double? _liveMarkPrice;
+  WebViewController? _chartController;
+  bool _chartReady = false;
+  bool _chartDataInitialized = false;
 
   bool _loading = false;
   String? _error;
@@ -60,6 +62,7 @@ class _TradePageState extends ConsumerState<TradePage> {
   @override
   void initState() {
     super.initState();
+    _initChartController();
     _restoreChartPrefsAndMarket().then((_) {
       if (mounted) {
         _loadAll();
@@ -82,6 +85,109 @@ class _TradePageState extends ConsumerState<TradePage> {
   double _toDouble(dynamic v) {
     if (v is num) return v.toDouble();
     return double.tryParse(v.toString()) ?? 0.0;
+  }
+
+  void _initChartController() {
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0x00000000))
+      ..addJavaScriptChannel(
+        'EXT_LOG',
+        onMessageReceived: (msg) => debugPrint('[CHART_JS] ${msg.message}'),
+      )
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onWebResourceError: (e) {
+            debugPrint('[CHART] resource error: $e');
+          },
+          onPageFinished: (_) {
+            _chartReady = true;
+            // Bridge console/error to Flutter for debugging
+            _chartController?.runJavaScript('''
+              try {
+                const _origLog = console.log;
+                const _origErr = console.error;
+                const _origWarn = console.warn;
+                console.log = (...args) => { EXT_LOG.postMessage('[LOG] ' + args.join(' ')); _origLog(...args); };
+                console.error = (...args) => { EXT_LOG.postMessage('[ERR] ' + args.join(' ')); _origErr(...args); };
+                console.warn = (...args) => { EXT_LOG.postMessage('[WARN] ' + args.join(' ')); _origWarn(...args); };
+                window.addEventListener('error', (e) => { EXT_LOG.postMessage('[ERR] ' + e.message); });
+                EXT_LOG.postMessage('bridge-ready');
+              } catch (e) {
+                // Swallow bridge errors
+              }
+            ''');
+            _sendChartData();
+            _sendPriceLine();
+          },
+        ),
+      );
+    controller.loadFlutterAsset('assets/web/chart.html');
+    _chartController = controller;
+  }
+
+  void _sendChartData() {
+    if (!_chartReady || _chartController == null) return;
+    try {
+      // Lightweight charts expects oldest -> newest order
+      final data = _candles.reversed.map((c) {
+        double toNum(dynamic v) {
+          if (v is num) return v.toDouble();
+          return double.tryParse(v.toString()) ?? 0.0;
+        }
+
+        final rawTs = toNum(c['T'] ?? c['t'] ?? c['time'] ?? c['timestamp']);
+        final seconds = rawTs > 1e11 ? (rawTs / 1000).floor() : rawTs.floor();
+        return {
+          'time': seconds,
+          'open': toNum(c['o'] ?? c['open'] ?? c['O']),
+          'high': toNum(c['h'] ?? c['high'] ?? c['H']),
+          'low': toNum(c['l'] ?? c['low'] ?? c['L']),
+          'close': toNum(c['c'] ?? c['close'] ?? c['C']),
+        };
+      }).toList();
+      final payload = jsonEncode(data);
+      _chartController!.runJavaScript('window.setChartData($payload);');
+      _chartDataInitialized = true;
+    } catch (e) {
+      debugPrint('[CHART] sendData error: $e');
+    }
+  }
+
+  void _sendPriceLine() {
+    if (!_chartReady || _chartController == null) return;
+    final price = _liveMarkPrice ??
+        (_stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null);
+    if (price == null) return;
+    try {
+      final payload = jsonEncode({'price': price, 'color': '#cccccc', 'title': 'Last'});
+      _chartController!.runJavaScript('window.setChartPriceLine("last", $payload);');
+    } catch (e) {
+      debugPrint('[CHART] priceLine error: $e');
+    }
+  }
+
+  void _sendChartLastUpdate(Map<String, dynamic> candle) {
+    if (!_chartReady || _chartController == null || !_chartDataInitialized) return;
+    try {
+      double toNum(dynamic v) {
+        if (v is num) return v.toDouble();
+        return double.tryParse(v.toString()) ?? 0.0;
+      }
+
+      final rawTs = toNum(candle['T'] ?? candle['t'] ?? candle['time'] ?? candle['timestamp']);
+      final seconds = rawTs > 1e11 ? (rawTs / 1000).floor() : rawTs.floor();
+      final payload = jsonEncode({
+        'time': seconds,
+        'open': toNum(candle['o'] ?? candle['open'] ?? candle['O']),
+        'high': toNum(candle['h'] ?? candle['high'] ?? candle['H']),
+        'low': toNum(candle['l'] ?? candle['low'] ?? candle['L']),
+        'close': toNum(candle['c'] ?? candle['close'] ?? candle['C']),
+      });
+      _chartController!.runJavaScript('window.updateLastCandle($payload);');
+    } catch (e) {
+      debugPrint('[CHART] update error: $e');
+    }
   }
 
   MarketRow? _selectedMarketRow() {
@@ -205,6 +311,8 @@ class _TradePageState extends ConsumerState<TradePage> {
       if (selectedLeverage != null) {
         await LocalStore.saveLeverage(marketName: market, leverage: selectedLeverage);
       }
+      _sendChartData();
+      _sendPriceLine();
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = _friendlyError(e));
@@ -234,10 +342,10 @@ class _TradePageState extends ConsumerState<TradePage> {
   void _onSelectMarket(String market) {
     if (_selectedMarket == market) return;
     _liveMarkPrice = null; // reset live price on switch
+    _chartDataInitialized = false;
     LocalStore.saveSelectedTradeMarket(market);
     _subscribeCandleStream(marketOverride: market);
     _loadAll(marketOverride: market);
-    _candleRenderVersion++; // force chart rebuild when market changes
   }
 
   Future<void> _restoreChartPrefsAndMarket() async {
@@ -256,48 +364,6 @@ class _TradePageState extends ConsumerState<TradePage> {
       intervalLabel: _selectedIntervalLabel,
       candleType: _selectedCandleType,
     );
-  }
-
-  List<Candle> _candlesForChart() {
-    double toDouble(dynamic v) {
-      if (v is num) return v.toDouble();
-      return double.tryParse(v.toString()) ?? double.nan;
-    }
-
-    DateTime asDate(dynamic raw) {
-      if (raw == null) return DateTime.now();
-      if (raw is DateTime) return raw;
-      final d = toDouble(raw);
-      if (d.isNaN || d.isInfinite) return DateTime.now();
-      final ms = d > 1e12 ? d : d * 1000;
-      if (ms.isNaN || ms.isInfinite) return DateTime.now();
-      return DateTime.fromMillisecondsSinceEpoch(ms.toInt());
-    }
-
-    // Chart library expects newest FIRST (index 0 = newest, rightmost)
-    // _candles is already stored newest first, so use directly
-    final chartCandles = _candles.map((c) {
-      double safeNum(dynamic v) {
-        final d = toDouble(v);
-        if (d.isNaN || d.isInfinite) return 0.0;
-        return d;
-      }
-      return Candle(
-        date: asDate(c['t'] ?? c['time'] ?? c['timestamp'] ?? c['T']),
-        open: safeNum(c['o'] ?? c['open'] ?? c['O']),
-        high: safeNum(c['h'] ?? c['high'] ?? c['H']),
-        low: safeNum(c['l'] ?? c['low'] ?? c['L']),
-        close: safeNum(c['c'] ?? c['close'] ?? c['C']),
-        volume: safeNum(c['v'] ?? c['volume'] ?? 0),
-      );
-    }).toList();
-    
-    // Debug: Log chart data
-    if (chartCandles.isNotEmpty) {
-      debugPrint('[CHART_DATA] Total: ${chartCandles.length}, First (newest): ${chartCandles.first.date} close=${chartCandles.first.close}, Last (oldest): ${chartCandles.last.date} close=${chartCandles.last.close}');
-    }
-    
-    return chartCandles;
   }
 
   String _wsBaseUrl() {
@@ -422,6 +488,7 @@ class _TradePageState extends ConsumerState<TradePage> {
                   setState(() {
                     _liveMarkPrice = price;
                   });
+                  _sendPriceLine();
                 }
               }
             }
@@ -491,7 +558,8 @@ class _TradePageState extends ConsumerState<TradePage> {
         'h': _num(candleMap['h'] ?? candleMap['high'] ?? candleMap['H']),
         'l': _num(candleMap['l'] ?? candleMap['low'] ?? candleMap['L']),
         'c': _num(candleMap['c'] ?? candleMap['close'] ?? candleMap['C']),
-        'v': _num(candleMap['v'] ?? candleMap['volume'] ?? candleMap['V'] ?? 0),
+        // Volume intentionally ignored; set minimal non-zero to satisfy widget
+        'v': 1,
         'T': tsRaw,
       };
 
@@ -535,6 +603,12 @@ class _TradePageState extends ConsumerState<TradePage> {
           _candles = updated;
           _candleDebug = 'msg $_candleMsgCount ${_selectedCandleType} close=${latestClose ?? '--'}';
         });
+        if (_chartDataInitialized) {
+          _sendChartLastUpdate(normalized);
+        } else {
+          _sendChartData();
+          _sendPriceLine();
+        }
       }
     } catch (e) {
       debugPrint('[CANDLE_WS] parse error: $e');
@@ -1136,7 +1210,7 @@ class _TradePageState extends ConsumerState<TradePage> {
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(color: _colorBgElevated),
                 ),
-                child: _loading
+                child: _chartController == null
                     ? const Center(child: CircularProgressIndicator())
                     : _candles.isEmpty
                         ? Center(
@@ -1145,9 +1219,16 @@ class _TradePageState extends ConsumerState<TradePage> {
                               style: const TextStyle(color: _colorTextSecondary),
                             ),
                           )
-                        : Candlesticks(
-                            key: ValueKey('candles_${_selectedMarket}_$_candleRenderVersion'),
-                            candles: _candlesForChart(),
+                        : ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: WebViewWidget(
+                              controller: _chartController!,
+                              gestureRecognizers: {
+                                Factory<OneSequenceGestureRecognizer>(
+                                  () => EagerGestureRecognizer(),
+                                ),
+                              },
+                            ),
                           ),
               ),
               const SizedBox(height: 8),

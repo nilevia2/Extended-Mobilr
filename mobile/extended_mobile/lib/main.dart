@@ -2,6 +2,7 @@ library extended_app;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,10 +15,13 @@ import 'package:intl/intl.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:dio/dio.dart';
-import 'package:candlesticks/candlesticks.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart' show AndroidWebViewPlatform;
+import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 
@@ -70,6 +74,11 @@ final Map<String, Future<Uint8List>> _logoBytesFutures = {};
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Register Android WebView platform implementation
+  if (!kIsWeb && Platform.isAndroid) {
+    AndroidWebViewPlatform.registerWith();
+  }
   
   // Global error handling to prevent app crashes
   FlutterError.onError = (FlutterErrorDetails details) {
@@ -79,7 +88,7 @@ Future<void> main() async {
   };
   
   // Handle platform errors
-  PlatformDispatcher.instance.onError = (error, stack) {
+  ui.PlatformDispatcher.instance.onError = (error, stack) {
     debugPrint('[PLATFORM_ERROR] $error');
     debugPrint('[PLATFORM_ERROR] Stack: $stack');
     return true; // Handled, don't crash

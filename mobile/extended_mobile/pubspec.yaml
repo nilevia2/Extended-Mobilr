@@ -10,7 +10,6 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.6
-  candlesticks: ^2.1.0
   webview_flutter: ^4.10.0
   webview_flutter_android: ^4.10.11
   dio: ^5.4.0
