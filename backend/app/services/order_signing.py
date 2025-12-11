@@ -317,11 +317,6 @@ def build_signed_tpsl_position_order_json(
         },
         "selfTradeProtectionLevel": "ACCOUNT",
         "tpSlType": "POSITION",  # Monitor position, not order
-        "debuggingAmounts": {
-            "collateralAmount": str(main_settlement.debugging_amounts.collateral_amount),
-            "feeAmount": str(main_settlement.debugging_amounts.fee_amount),
-            "syntheticAmount": str(main_settlement.debugging_amounts.synthetic_amount),
-        },
     }
 
     # Add Take Profit if provided
@@ -360,11 +355,6 @@ def build_signed_tpsl_position_order_json(
                 },
                 "starkKey": hex(tp_settlement.settlement.stark_key),
                 "collateralPosition": str(tp_settlement.settlement.collateral_position),
-            },
-            "debuggingAmounts": {
-                "collateralAmount": str(tp_settlement.debugging_amounts.collateral_amount),
-                "feeAmount": str(tp_settlement.debugging_amounts.fee_amount),
-                "syntheticAmount": str(tp_settlement.debugging_amounts.synthetic_amount),
             },
         }
 
@@ -406,11 +396,6 @@ def build_signed_tpsl_position_order_json(
                 },
                 "starkKey": hex(sl_settlement.settlement.stark_key),
                 "collateralPosition": str(sl_settlement.settlement.collateral_position),
-            },
-            "debuggingAmounts": {
-                "collateralAmount": str(sl_settlement.debugging_amounts.collateral_amount),
-                "feeAmount": str(sl_settlement.debugging_amounts.fee_amount),
-                "syntheticAmount": str(sl_settlement.debugging_amounts.synthetic_amount),
             },
         }
 
