@@ -250,12 +250,18 @@ class ExtendedClient {
     required String interval,
     String candleType = 'trades', // trades | mark-prices | index-prices
     int limit = 400,
+    int? endTimeMs, // optional end time (ms since epoch) for pagination
   }) async {
     try {
-      debugPrint('[ExtendedClient] GET /info/candles/$marketName/$candleType interval=$interval limit=$limit');
+      debugPrint(
+          '[ExtendedClient] GET /info/candles/$marketName/$candleType interval=$interval limit=$limit${endTimeMs != null ? ' endTime=$endTimeMs' : ''}');
+      final params = {'interval': interval, 'limit': limit};
+      if (endTimeMs != null) {
+        params['endTime'] = endTimeMs;
+      }
       final res = await _dio.get(
         '/info/candles/$marketName/$candleType',
-        queryParameters: {'interval': interval, 'limit': limit},
+        queryParameters: params,
       );
       final data = res.data['data'] ?? res.data;
       if (data is List) {

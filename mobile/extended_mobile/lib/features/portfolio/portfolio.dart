@@ -5335,7 +5335,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
         throw StateError('WalletConnect session lost. Please reconnect your wallet.');
       }
       debugPrint('[ONBOARD] WalletConnect topic: ${svc.topic}');
-      
+
       // Request first signature - WalletConnect will automatically try to open wallet
       debugPrint('[ONBOARD] Requesting first signature (AccountCreation)');
       String? sigCreation;
@@ -5347,7 +5347,7 @@ class _PortfolioBodyState extends ConsumerState<_PortfolioBody> with WidgetsBind
           throw TimeoutException('Wallet did not respond. Please check your wallet app and approve the signature request.');
         });
         debugPrint('[ONBOARD] Got first signature successfully');
-    } catch (e) {
+      } catch (e) {
         debugPrint('[ONBOARD] First signature error: $e');
         // If app was in background, wait a bit and check if signature came through
         await Future.delayed(const Duration(seconds: 2));

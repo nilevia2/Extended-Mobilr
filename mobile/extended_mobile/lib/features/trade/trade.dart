@@ -23,6 +23,8 @@ class _TradePageState extends ConsumerState<TradePage> {
   WebViewController? _chartController;
   bool _chartReady = false;
   bool _chartDataInitialized = false;
+  bool _loadingOlder = false;
+  bool _hasMoreOlder = true;
 
   bool _loading = false;
   String? _error;
@@ -87,6 +89,17 @@ class _TradePageState extends ConsumerState<TradePage> {
     return double.tryParse(v.toString()) ?? 0.0;
   }
 
+  double? _latestCandlePrice() {
+    if (_candles.isEmpty) return null;
+    final c = _candles.first;
+    final v = c['c'] ?? c['close'] ?? c['C'];
+    return v is num ? v.toDouble() : double.tryParse(v.toString());
+  }
+
+  double? _currentPrice() {
+    return _liveMarkPrice ?? _latestCandlePrice();
+  }
+
   void _initChartController() {
     final controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -94,6 +107,19 @@ class _TradePageState extends ConsumerState<TradePage> {
       ..addJavaScriptChannel(
         'EXT_LOG',
         onMessageReceived: (msg) => debugPrint('[CHART_JS] ${msg.message}'),
+      )
+      ..addJavaScriptChannel(
+        'EXT_EVT',
+        onMessageReceived: (msg) {
+          try {
+            final data = jsonDecode(msg.message);
+            if (data is Map && data['type'] == 'loadMore') {
+              _loadOlderCandles();
+            }
+          } catch (e) {
+            debugPrint('[CHART_EVT] parse error: $e');
+          }
+        },
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -126,7 +152,7 @@ class _TradePageState extends ConsumerState<TradePage> {
     _chartController = controller;
   }
 
-  void _sendChartData() {
+  void _sendChartData({bool preserveRange = false}) {
     if (!_chartReady || _chartController == null) return;
     try {
       // Lightweight charts expects oldest -> newest order
@@ -147,7 +173,8 @@ class _TradePageState extends ConsumerState<TradePage> {
         };
       }).toList();
       final payload = jsonEncode(data);
-      _chartController!.runJavaScript('window.setChartData($payload);');
+      _chartController!
+          .runJavaScript('window.setChartData($payload, ${preserveRange ? 'true' : 'false'});');
       _chartDataInitialized = true;
     } catch (e) {
       debugPrint('[CHART] sendData error: $e');
@@ -155,16 +182,8 @@ class _TradePageState extends ConsumerState<TradePage> {
   }
 
   void _sendPriceLine() {
-    if (!_chartReady || _chartController == null) return;
-    final price = _liveMarkPrice ??
-        (_stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null);
-    if (price == null) return;
-    try {
-      final payload = jsonEncode({'price': price, 'color': '#cccccc', 'title': 'Last'});
-      _chartController!.runJavaScript('window.setChartPriceLine("last", $payload);');
-    } catch (e) {
-      debugPrint('[CHART] priceLine error: $e');
-    }
+    // Price line not needed; no-op
+    return;
   }
 
   void _sendChartLastUpdate(Map<String, dynamic> candle) {
@@ -187,6 +206,65 @@ class _TradePageState extends ConsumerState<TradePage> {
       _chartController!.runJavaScript('window.updateLastCandle($payload);');
     } catch (e) {
       debugPrint('[CHART] update error: $e');
+    }
+  }
+
+  Future<void> _loadOlderCandles() async {
+    if (_loadingOlder || !_hasMoreOlder || _candles.isEmpty) return;
+    _loadingOlder = true;
+    try {
+      double _num(dynamic v) {
+        if (v is num) return v.toDouble();
+        if (v is String) return double.tryParse(v) ?? 0;
+        return 0;
+      }
+      final oldest = _candles.last;
+      final oldestTs = _num(oldest['T'] ?? oldest['t'] ?? oldest['time'] ?? oldest['timestamp']);
+      if (oldestTs <= 0) {
+        _loadingOlder = false;
+        return;
+      }
+      debugPrint('[CHART] load older starting from $oldestTs');
+      final res = await _client.getCandles(
+        marketName: _selectedMarket,
+        interval: _quickIntervals[_selectedIntervalLabel] ?? _moreIntervals[_selectedIntervalLabel] ?? 'PT1H',
+        candleType: _selectedCandleType,
+        limit: 400,
+        endTimeMs: oldestTs.toInt() - 1,
+      );
+      debugPrint('[CHART] load older fetched ${res.length}');
+      if (res.isEmpty) {
+        _hasMoreOlder = false;
+        _loadingOlder = false;
+        return;
+      }
+      // Merge without duplicates (API returns newest first)
+      final existingKeys = _candles
+          .map((c) => (c['T'] ?? c['t'] ?? c['time'] ?? c['timestamp']).toString())
+          .toSet();
+      final newSeg = <Map<String, dynamic>>[];
+      for (final c in res) {
+        final key = (c['T'] ?? c['t'] ?? c['time'] ?? c['timestamp']).toString();
+        if (!existingKeys.contains(key)) {
+          newSeg.add(c);
+        }
+      }
+      if (newSeg.isEmpty) {
+        _hasMoreOlder = false;
+        _loadingOlder = false;
+        return;
+      }
+      // API newest first; append to end (oldest)
+      final updated = List<Map<String, dynamic>>.from(_candles)..addAll(newSeg);
+      setState(() {
+        _candles = updated;
+      });
+      // Update chart data while preserving current view
+      _sendChartData(preserveRange: true);
+    } catch (e) {
+      debugPrint('[CHART] load older error: $e');
+    } finally {
+      _loadingOlder = false;
     }
   }
 
@@ -343,6 +421,7 @@ class _TradePageState extends ConsumerState<TradePage> {
     if (_selectedMarket == market) return;
     _liveMarkPrice = null; // reset live price on switch
     _chartDataInitialized = false;
+    _hasMoreOlder = true;
     LocalStore.saveSelectedTradeMarket(market);
     _subscribeCandleStream(marketOverride: market);
     _loadAll(marketOverride: market);
@@ -917,7 +996,7 @@ class _TradePageState extends ConsumerState<TradePage> {
   }
 
   void _onTradeTap() {
-    final price = _liveMarkPrice ?? (_stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null);
+    final price = _currentPrice();
     if (_portfolioBodyKey.currentState != null) {
       _portfolioBodyKey.currentState!._showCreateOrderDialog(_selectedMarket, price);
       return;
@@ -1023,7 +1102,7 @@ class _TradePageState extends ConsumerState<TradePage> {
   }
 
   Widget _buildPriceSummary() {
-    final last = _liveMarkPrice ?? (_stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null);
+    final last = _currentPrice();
     final changePct = _selectedMarketRow()?.dailyChangePercent ?? _extractChangePct(_stats);
     final bid = _stats != null ? _toDouble(_stats!['bidPrice'] ?? _stats!['bid_price']) : null;
     final ask = _stats != null ? _toDouble(_stats!['askPrice'] ?? _stats!['ask_price']) : null;
@@ -1221,20 +1300,34 @@ class _TradePageState extends ConsumerState<TradePage> {
                           )
                         : ClipRRect(
                             borderRadius: BorderRadius.circular(16),
-                            child: WebViewWidget(
-                              controller: _chartController!,
-                              gestureRecognizers: {
-                                Factory<OneSequenceGestureRecognizer>(
-                                  () => EagerGestureRecognizer(),
+                            child: Stack(
+                              children: [
+                                WebViewWidget(
+                                  controller: _chartController!,
+                                  gestureRecognizers: {
+                                    Factory<OneSequenceGestureRecognizer>(
+                                      () => EagerGestureRecognizer(),
+                                    ),
+                                  },
                                 ),
-                              },
+                                Positioned(
+                                  right: 12,
+                                  bottom: 12,
+                                  child: IconButton(
+                                    splashRadius: 18,
+                                    iconSize: 18,
+                                    padding: const EdgeInsets.all(4),
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () {
+                                      _chartController?.runJavaScript('window.resetView && window.resetView();');
+                                    },
+                                    icon: const Icon(Icons.refresh, color: Colors.white70),
+                                    tooltip: 'Reset view',
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'WS: $_candleDebug',
-                style: const TextStyle(color: _colorTextSecondary, fontSize: 12),
               ),
               const SizedBox(height: 16),
               Container(

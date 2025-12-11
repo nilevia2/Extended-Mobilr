@@ -41,6 +41,8 @@
         timeVisible: true,
         secondsVisible: false,
         borderVisible: false,
+        barSpacing: 48,
+        rightOffset: 5,
       },
       handleScroll: {
         mouseWheel: true,
@@ -70,15 +72,35 @@
 
     const priceLines = {};
     let lastData = [];
+    const barsToShow = 40;
+    let lastRange = null;
 
-    function setData(data) {
+    function applyDefaultView() {
+      const to = lastData.length;
+      const from = Math.max(0, to - barsToShow);
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+      chart.priceScale('right').applyOptions({
+        autoScale: true,
+        scaleMargins: { top: 0.05, bottom: 0.05 },
+      });
+    }
+
+    function setData(data, preserveRange = false) {
       try {
+        const prevLen = lastData.length;
         // Ensure data is array and sorted by time ascending
         const arr = Array.isArray(data) ? data.slice().sort((a, b) => a.time - b.time) : [];
         console.log('setData len', arr.length);
         lastData = arr;
         series.setData(arr);
-        chart.timeScale().fitContent();
+        if (preserveRange && lastRange) {
+          const delta = arr.length - prevLen;
+          const from = (lastRange.from ?? 0) + delta;
+          const to = (lastRange.to ?? 0) + delta;
+          chart.timeScale().setVisibleLogicalRange({ from, to });
+        } else {
+          applyDefaultView();
+        }
       } catch (e) {
         console.error('setData error', e);
       }
@@ -103,15 +125,42 @@
     }
 
     // Expose helpers for Flutter to call directly
-    window.setChartData = (payload) => setData(payload || []);
+    window.setChartData = (payload, preserveRange = false) => setData(payload || [], preserveRange);
     window.setChartPriceLine = (id, payload) => addPriceLine(id || 'price', payload || {});
     window.updateLastCandle = (payload) => {
       try {
         series.update(payload);
+        if (payload && typeof payload.time !== 'undefined') {
+          const t = payload.time;
+          const idx = lastData.findIndex((d) => d.time === t);
+          if (idx >= 0) {
+            lastData[idx] = payload;
+          } else {
+            lastData.push(payload);
+            lastData.sort((a, b) => a.time - b.time);
+          }
+        }
       } catch (e) {
         console.error('updateLast error', e);
       }
     };
+
+    window.setLogicalRange = (from, to) => {
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+    };
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      lastRange = range;
+      if (!range || !lastData.length) return;
+      // Logical range uses bar indices; trigger when near the first bar
+      if (range.from <= 1) {
+        try {
+          EXT_EVT.postMessage(JSON.stringify({ type: 'loadMore', range }));
+        } catch (_) {}
+      }
+    });
+
+    window.resetView = () => applyDefaultView();
 
     // Resize chart on viewport changes
     const resizeObserver = new ResizeObserver(() => {
@@ -120,11 +169,14 @@
       if (w > 0 && h > 0) {
         chart.resize(w, h);
         if (lastData.length > 0) {
-          chart.timeScale().fitContent();
+          applyDefaultView();
         }
       }
     });
     resizeObserver.observe(chartElement);
+
+    // Expose reset to default zoom
+    window.resetView = () => applyDefaultView();
   </script>
 </body>
 </html>
