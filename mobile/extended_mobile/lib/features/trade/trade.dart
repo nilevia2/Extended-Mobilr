@@ -237,6 +237,7 @@ class _TradePageState extends ConsumerState<TradePage> {
     LocalStore.saveSelectedTradeMarket(market);
     _subscribeCandleStream(marketOverride: market);
     _loadAll(marketOverride: market);
+    _candleRenderVersion++; // force chart rebuild when market changes
   }
 
   Future<void> _restoreChartPrefsAndMarket() async {
@@ -532,7 +533,6 @@ class _TradePageState extends ConsumerState<TradePage> {
         }
         setState(() {
           _candles = updated;
-          _candleRenderVersion++;
           _candleDebug = 'msg $_candleMsgCount ${_selectedCandleType} close=${latestClose ?? '--'}';
         });
       }
@@ -1146,7 +1146,7 @@ class _TradePageState extends ConsumerState<TradePage> {
                             ),
                           )
                         : Candlesticks(
-                            key: ValueKey(_candleRenderVersion),
+                            key: ValueKey('candles_${_selectedMarket}_$_candleRenderVersion'),
                             candles: _candlesForChart(),
                           ),
               ),
