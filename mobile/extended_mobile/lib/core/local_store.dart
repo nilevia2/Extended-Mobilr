@@ -27,6 +27,7 @@ class LocalStore {
   static const _tpSlTriggerTypeKey = 'tpsl_trigger_type'; // LAST/MARK/INDEX
   static const _candleIntervalKey = 'candle_interval'; // label like '1m','1h'
   static const _candleTypeKey = 'candle_type'; // trades/mark-prices/index-prices
+  static const _selectedTradeMarketKey = 'selected_trade_market'; // last selected market in Trade tab
   
   // Secure storage for encrypted sensitive keys
   static const _secureStorage = FlutterSecureStorage(
@@ -100,6 +101,16 @@ class LocalStore {
       'interval': prefs.getString(_candleIntervalKey) ?? '1h',
       'type': prefs.getString(_candleTypeKey) ?? 'trades',
     };
+  }
+
+  static Future<void> saveSelectedTradeMarket(String market) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_selectedTradeMarketKey, market);
+  }
+
+  static Future<String?> loadSelectedTradeMarket() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_selectedTradeMarketKey);
   }
 
   static String _apiKeyKey(String address, int index) {

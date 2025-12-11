@@ -17,6 +17,10 @@ class _TradePageState extends ConsumerState<TradePage> {
   int _candleRenderVersion = 0;
   bool _candleReconnecting = false;
   int _candleSession = 0; // Increment to invalidate old sockets when switching
+  WebSocket? _markPriceSocket;
+  StreamSubscription? _markPriceSub;
+  Timer? _markPriceReconnectTimer;
+  double? _liveMarkPrice;
 
   bool _loading = false;
   String? _error;
@@ -56,10 +60,11 @@ class _TradePageState extends ConsumerState<TradePage> {
   @override
   void initState() {
     super.initState();
-    _restoreChartPrefs().then((_) {
+    _restoreChartPrefsAndMarket().then((_) {
       if (mounted) {
         _loadAll();
         _subscribeCandleStream();
+        _connectMarkPriceWebSocket();
       }
     });
   }
@@ -79,10 +84,44 @@ class _TradePageState extends ConsumerState<TradePage> {
     return double.tryParse(v.toString()) ?? 0.0;
   }
 
+  MarketRow? _selectedMarketRow() {
+    final marketsAsync = ref.read(_marketsProvider);
+    return marketsAsync.maybeWhen(
+      data: (rows) {
+        for (final m in rows) {
+          if (m.name == _selectedMarket) return m;
+        }
+        return rows.isNotEmpty ? rows.first : null;
+      },
+      orElse: () => null,
+    );
+  }
+
+  // Normalize change percent: API returns dailyPriceChangePercentage as a fraction (e.g., -0.05 = -5%)
+  double? _extractChangePct(Map<String, dynamic>? stats) {
+    if (stats == null) return null;
+    final pctRaw = stats['dailyPriceChangePercentage'] ?? stats['daily_price_change_percentage'];
+    if (pctRaw != null) {
+      final v = _toDouble(pctRaw);
+      // If looks like a fraction, scale to percent
+      return v.abs() <= 1 ? v * 100 : v;
+    }
+    final alt = stats['dailyPriceChange'] ?? stats['daily_price_change'];
+    if (alt != null) {
+      final v = _toDouble(alt);
+      // Heuristic: if absolute is small, treat as fraction; otherwise assume already percent
+      return v.abs() <= 1 ? v * 100 : v;
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     _candleSocket?.close();
     _candleReconnectTimer?.cancel();
+    _markPriceSub?.cancel();
+    _markPriceSocket?.close();
+    _markPriceReconnectTimer?.cancel();
     super.dispose();
   }
 
@@ -194,14 +233,20 @@ class _TradePageState extends ConsumerState<TradePage> {
 
   void _onSelectMarket(String market) {
     if (_selectedMarket == market) return;
+    _liveMarkPrice = null; // reset live price on switch
+    LocalStore.saveSelectedTradeMarket(market);
     _subscribeCandleStream(marketOverride: market);
     _loadAll(marketOverride: market);
   }
 
-  Future<void> _restoreChartPrefs() async {
+  Future<void> _restoreChartPrefsAndMarket() async {
     final prefs = await LocalStore.loadCandlePreferences();
+    final storedMarket = await LocalStore.loadSelectedTradeMarket();
     _selectedIntervalLabel = prefs['interval'] ?? _selectedIntervalLabel;
     _selectedCandleType = prefs['type'] ?? _selectedCandleType;
+    if (storedMarket != null && storedMarket.isNotEmpty) {
+      _selectedMarket = storedMarket;
+    }
     setState(() {});
   }
 
@@ -341,6 +386,70 @@ class _TradePageState extends ConsumerState<TradePage> {
       if (sessionId != _candleSession) return;
       if (!mounted) return;
       _subscribeCandleStream();
+    });
+  }
+
+  void _connectMarkPriceWebSocket() async {
+    // Reuse public mark price stream, filter locally by selected market
+    String wsBase = dotenv.env['EXTENDED_WS_BASE_URL']?.trim() ?? 'wss://api.starknet.extended.exchange/stream.extended.exchange/v1';
+    if (wsBase.startsWith('https://')) {
+      wsBase = wsBase.replaceFirst('https://', 'wss://');
+    } else if (!wsBase.startsWith('wss://') && !wsBase.startsWith('ws://')) {
+      wsBase = 'wss://$wsBase';
+    }
+    final uri = Uri.parse('$wsBase/prices/mark');
+    debugPrint('[TRADE_MARK_WS] Connecting to $uri');
+
+    _markPriceSub?.cancel();
+    _markPriceSocket?.close();
+    _markPriceSocket = null;
+
+    try {
+      final socket = await WebSocket.connect(uri.toString());
+      _markPriceSocket = socket;
+      _markPriceSub = socket.listen(
+        (message) {
+          try {
+            final data = jsonDecode(message as String) as Map<String, dynamic>;
+            if (data['type'] == 'MP') {
+              final payload = data['data'] as Map<String, dynamic>? ?? {};
+              final market = payload['m']?.toString();
+              if (market == _selectedMarket) {
+                final priceStr = payload['p']?.toString();
+                final price = priceStr != null ? double.tryParse(priceStr) : null;
+                if (price != null && mounted) {
+                  setState(() {
+                    _liveMarkPrice = price;
+                  });
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('[TRADE_MARK_WS] Error parsing message: $e');
+          }
+        },
+        onError: (error) {
+          debugPrint('[TRADE_MARK_WS] Stream error: $error');
+          _scheduleMarkPriceReconnect();
+        },
+        onDone: () {
+          debugPrint('[TRADE_MARK_WS] Stream closed');
+          _scheduleMarkPriceReconnect();
+        },
+        cancelOnError: false,
+      );
+      debugPrint('[TRADE_MARK_WS] Connected');
+    } catch (e) {
+      debugPrint('[TRADE_MARK_WS] Connection error: $e');
+      _scheduleMarkPriceReconnect();
+    }
+  }
+
+  void _scheduleMarkPriceReconnect() {
+    _markPriceReconnectTimer?.cancel();
+    _markPriceReconnectTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted) return;
+      _connectMarkPriceWebSocket();
     });
   }
 
@@ -734,7 +843,7 @@ class _TradePageState extends ConsumerState<TradePage> {
   }
 
   void _onTradeTap() {
-    final price = _stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null;
+    final price = _liveMarkPrice ?? (_stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null);
     if (_portfolioBodyKey.currentState != null) {
       _portfolioBodyKey.currentState!._showCreateOrderDialog(_selectedMarket, price);
       return;
@@ -840,10 +949,8 @@ class _TradePageState extends ConsumerState<TradePage> {
   }
 
   Widget _buildPriceSummary() {
-    final last = _stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null;
-    final changePct = _stats != null
-        ? _toDouble(_stats!['dailyPriceChangePercentage'] ?? _stats!['daily_price_change_percentage'] ?? _stats!['dailyPriceChange'] ?? _stats!['daily_price_change'])
-        : null;
+    final last = _liveMarkPrice ?? (_stats != null ? _toDouble(_stats!['lastPrice'] ?? _stats!['last_price']) : null);
+    final changePct = _selectedMarketRow()?.dailyChangePercent ?? _extractChangePct(_stats);
     final bid = _stats != null ? _toDouble(_stats!['bidPrice'] ?? _stats!['bid_price']) : null;
     final ask = _stats != null ? _toDouble(_stats!['askPrice'] ?? _stats!['ask_price']) : null;
 
