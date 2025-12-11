@@ -215,6 +215,7 @@ class _MarketsHomeState extends ConsumerState<_MarketsHome> with SingleTickerPro
         ),
         TabBar(
           controller: _tabController,
+          dividerColor: Colors.transparent,
           tabs: const [
             Tab(text: 'All'),
             Tab(text: 'Watchlist'),
@@ -316,147 +317,151 @@ class _MarketsList extends StatelessWidget {
     return LayoutBuilder(builder: (context, constraints) {
       // Give more room to the name; keep trailing compact to avoid overflow in narrow screens.
       final trailingWidth = (constraints.maxWidth * _trailingFraction).clamp(150.0, 230.0);
-      return ListView.builder(
-        itemCount: rows.length + 1,
-        itemBuilder: (ctx, i) {
-          if (i == 0) {
+      return Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ListView.builder(
+          itemCount: rows.length + 1,
+          itemBuilder: (ctx, i) {
+            if (i == 0) {
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Row(children: [
+                  Expanded(child: Text('Market', style: Theme.of(context).textTheme.labelSmall)),
+                  SizedBox(
+                    width: trailingWidth,
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: trailingWidth * 0.4,
+                          child: Text('24h Vol', style: Theme.of(context).textTheme.labelSmall, textAlign: TextAlign.right),
+                        ),
+                        SizedBox(
+                          width: trailingWidth * 0.6,
+                          child: Text('Last Price', style: Theme.of(context).textTheme.labelSmall, textAlign: TextAlign.right),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: _starAreaWidth),
+                ]),
+              );
+            }
+            final r = rows[i - 1];
+            final livePrice = liveMarkPrices[r.name];
+            final positive = r.dailyChangePercent >= 0;
+            final color = positive ? _colorGain : _colorLoss;
+            final logoUrl = _logoUrl(r.assetName);
+            final isFav = watchlist.contains(r.name);
+            final base = r.assetName;
+            final quote = r.collateralAssetName.isNotEmpty ? r.collateralAssetName : 'USD';
             return Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-              child: Row(children: [
-                Expanded(child: Text('Market', style: Theme.of(context).textTheme.labelSmall)),
-                SizedBox(
-                  width: trailingWidth,
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: trailingWidth * 0.4,
-                        child: Text('24h Vol', style: Theme.of(context).textTheme.labelSmall, textAlign: TextAlign.right),
-                      ),
-                      SizedBox(
-                        width: trailingWidth * 0.6,
-                        child: Text('Last Price', style: Theme.of(context).textTheme.labelSmall, textAlign: TextAlign.right),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: _starAreaWidth),
-              ]),
-            );
-          }
-          final r = rows[i - 1];
-          final livePrice = liveMarkPrices[r.name];
-          final positive = r.dailyChangePercent >= 0;
-          final color = positive ? _colorGain : _colorLoss;
-          final logoUrl = _logoUrl(r.assetName);
-          final isFav = watchlist.contains(r.name);
-          final base = r.assetName;
-          final quote = r.collateralAssetName.isNotEmpty ? r.collateralAssetName : 'USD';
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: ListTile(
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              onTap: onMarketTap != null
-                  ? () => onMarketTap!(r.name, livePrice ?? r.lastPrice)
-                  : null,
-              leading: _MarketAvatar(symbol: r.assetName, logoUrl: logoUrl),
-              title: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '$base /',
-                          style: const TextStyle(fontWeight: FontWeight.w700, color: _colorTextMain, fontSize: _fsTitle),
-                          overflow: TextOverflow.ellipsis,
-                          softWrap: false,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      if (r.maxLeverage != null)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: Colors.white24),
-                            color: Colors.white10,
-                          ),
-                          child: Text(
-                            '${r.maxLeverage!.toStringAsFixed(r.maxLeverage!.truncateToDouble() == r.maxLeverage ? 0 : 0)}x',
-                            style: Theme.of(context).textTheme.labelSmall?.copyWith(fontSize: 10),
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 2),
-                  Text(quote, style: const TextStyle(color: _colorTextSecondary, fontSize: _fsSubtitle)),
-                ],
-              ),
-              trailing: SizedBox(
-                width: trailingWidth + _starAreaWidth,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: ListTile(
+                dense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                titleAlignment: ListTileTitleAlignment.top,
+                onTap: onMarketTap != null
+                    ? () => onMarketTap!(r.name, livePrice ?? r.lastPrice)
+                    : null,
+                leading: _MarketAvatar(symbol: r.assetName, logoUrl: logoUrl),
+                title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    SizedBox(
-                      width: trailingWidth,
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: trailingWidth * 0.4,
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '$base /',
+                            style: const TextStyle(fontWeight: FontWeight.w700, color: _colorTextMain, fontSize: _fsTitle),
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        if (r.maxLeverage != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.white24),
+                              color: Colors.white10,
+                            ),
                             child: Text(
-                              r.volumePretty,
-                              textAlign: TextAlign.right,
-                              style: const TextStyle(color: _colorTextMain, fontSize: _fsNumbers),
-                              overflow: TextOverflow.ellipsis,
-                              softWrap: false,
+                              '${r.maxLeverage!.toStringAsFixed(r.maxLeverage!.truncateToDouble() == r.maxLeverage ? 0 : 0)}x',
+                              style: Theme.of(context).textTheme.labelSmall?.copyWith(fontSize: 10),
                             ),
                           ),
-                          SizedBox(
-                            width: trailingWidth * 0.6,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(
-                                  livePrice != null
-                                      ? NumberFormat.currency(symbol: '\$').format(livePrice)
-                                      : r.lastPricePretty,
-                                  textAlign: TextAlign.right,
-                                  overflow: TextOverflow.ellipsis,
-                                  softWrap: false,
-                                  style: const TextStyle(color: _colorTextMain, fontSize: _fsNumbers),
-                                ),
-                                Text(
-                                  r.changePretty,
-                                  textAlign: TextAlign.right,
-                                  style: TextStyle(color: color, fontSize: _fsSubtitle),
-                                  overflow: TextOverflow.ellipsis,
-                                  softWrap: false,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
+                      ],
                     ),
-                    SizedBox(
-                      width: _starAreaWidth,
-                      child: IconButton(
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints.tightFor(width: _starAreaWidth, height: 28),
-                        visualDensity: VisualDensity.compact,
-                        iconSize: 20,
-                        tooltip: isFav ? 'Remove from watchlist' : 'Add to watchlist',
-                        onPressed: () => onToggle(r.name, !isFav),
-                        icon: Icon(isFav ? Icons.star : Icons.star_border, color: isFav ? _colorGreenPrimary : _colorTextSecondary),
-                      ),
-                    ),
+                    const SizedBox(height: 2),
+                    Text(quote, style: const TextStyle(color: _colorTextSecondary, fontSize: _fsSubtitle)),
                   ],
                 ),
+                trailing: SizedBox(
+                  width: trailingWidth + _starAreaWidth,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      SizedBox(
+                        width: trailingWidth,
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: trailingWidth * 0.4,
+                              child: Text(
+                                r.volumePretty,
+                                textAlign: TextAlign.right,
+                                style: const TextStyle(color: _colorTextMain, fontSize: _fsNumbers),
+                                overflow: TextOverflow.ellipsis,
+                                softWrap: false,
+                              ),
+                            ),
+                            SizedBox(
+                              width: trailingWidth * 0.6,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text(
+                                    livePrice != null
+                                        ? NumberFormat.currency(symbol: '\$').format(livePrice)
+                                        : r.lastPricePretty,
+                                    textAlign: TextAlign.right,
+                                    overflow: TextOverflow.ellipsis,
+                                    softWrap: false,
+                                    style: const TextStyle(color: _colorTextMain, fontSize: _fsNumbers),
+                                  ),
+                                  Text(
+                                    r.changePretty,
+                                    textAlign: TextAlign.right,
+                                    style: TextStyle(color: color, fontSize: _fsSubtitle),
+                                    overflow: TextOverflow.ellipsis,
+                                    softWrap: false,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(
+                        width: _starAreaWidth,
+                        child: IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.tightFor(width: _starAreaWidth, height: 28),
+                          visualDensity: VisualDensity.compact,
+                          iconSize: 20,
+                          tooltip: isFav ? 'Remove from watchlist' : 'Add to watchlist',
+                          onPressed: () => onToggle(r.name, !isFav),
+                          icon: Icon(isFav ? Icons.star : Icons.star_border, color: isFav ? _colorGreenPrimary : _colorTextSecondary),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       );
     });
   }

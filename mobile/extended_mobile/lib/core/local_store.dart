@@ -17,6 +17,7 @@ class LocalStore {
   static const _positionUpdateModeKey = 'position_update_mode'; // 'websocket' or 'polling'
   static const _pnlPriceTypeKey = 'pnl_price_type'; // 'markPrice' or 'midPrice'
   static const _storageLocationKey = 'storage_location'; // 'server' or 'local'
+  static const _leveragePrefix = 'leverage_for_'; // suffixed with market name
   static const _starkPrivateKeyPrefix = 'stark_private_key_for_'; // suffixed with <address>_<index>
   static const _starkPublicKeyPrefix = 'stark_public_key_for_'; // suffixed with <address>_<index>
   static const _vaultPrefix = 'vault_for_'; // suffixed with <address>_<index>
@@ -24,6 +25,8 @@ class LocalStore {
   static const _marketPrecisionTimestampPrefix = 'market_precision_ts_'; // timestamp for cache expiry
   static const _marketsTabIndexKey = 'markets_tab_index'; // 0: Markets, 1: Watchlist
   static const _tpSlTriggerTypeKey = 'tpsl_trigger_type'; // LAST/MARK/INDEX
+  static const _candleIntervalKey = 'candle_interval'; // label like '1m','1h'
+  static const _candleTypeKey = 'candle_type'; // trades/mark-prices/index-prices
   
   // Secure storage for encrypted sensitive keys
   static const _secureStorage = FlutterSecureStorage(
@@ -80,6 +83,23 @@ class LocalStore {
   static Future<String> loadTpSlTriggerType() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_tpSlTriggerTypeKey) ?? 'INDEX';
+  }
+
+  static Future<void> saveCandlePreferences({
+    required String intervalLabel,
+    required String candleType,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_candleIntervalKey, intervalLabel);
+    await prefs.setString(_candleTypeKey, candleType);
+  }
+
+  static Future<Map<String, String>> loadCandlePreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'interval': prefs.getString(_candleIntervalKey) ?? '1h',
+      'type': prefs.getString(_candleTypeKey) ?? 'trades',
+    };
   }
 
   static String _apiKeyKey(String address, int index) {
@@ -236,6 +256,23 @@ class LocalStore {
   static Future<String> loadStorageLocation() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_storageLocationKey) ?? 'server';
+  }
+
+  /// Save preferred leverage for a market (local-only cache, not sent to server)
+  static Future<void> saveLeverage({
+    required String marketName,
+    required double leverage,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('$_leveragePrefix$marketName', leverage.toString());
+  }
+
+  /// Load preferred leverage for a market (returns null if not set or invalid)
+  static Future<double?> loadLeverage(String marketName) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$_leveragePrefix$marketName');
+    if (raw == null) return null;
+    return double.tryParse(raw);
   }
 
   static String _starkPrivateKeyKey(String address, int index) {

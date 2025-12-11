@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #151515;
+      overflow: hidden;
+    }
+    #chart {
+      position: absolute;
+      inset: 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="chart"></div>
+  <script src="lightweight-charts.js"></script>
+  <script>
+    const chartElement = document.getElementById('chart');
+    const chart = LightweightCharts.createChart(chartElement, {
+      layout: { background: { color: '#151515' }, textColor: '#A0A0A0' },
+      grid: {
+        vertLines: { color: '#1F1F1F' },
+        horzLines: { color: '#1F1F1F' },
+      },
+      rightPriceScale: {
+        scaleMargins: { top: 0.05, bottom: 0.05 },
+        borderVisible: false,
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderVisible: false,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisDoubleClickReset: true,
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: true,
+      },
+      crosshair: {
+        mode: LightweightCharts.CrosshairMode.Normal,
+      },
+    });
+
+    const series = chart.addCandlestickSeries({
+      upColor: '#089981',
+      downColor: '#F23645',
+      borderUpColor: '#089981',
+      borderDownColor: '#F23645',
+      wickUpColor: '#089981',
+      wickDownColor: '#F23645',
+    });
+
+    const priceLines = {};
+
+    function setData(data) {
+      try {
+        series.setData(data);
+        chart.timeScale().fitContent();
+      } catch (e) {
+        console.error('setData error', e);
+      }
+    }
+
+    function addPriceLine(id, payload) {
+      try {
+        if (priceLines[id]) {
+          series.removePriceLine(priceLines[id]);
+        }
+        priceLines[id] = series.createPriceLine({
+          price: payload.price,
+          color: payload.color || '#cccccc',
+          lineWidth: payload.lineWidth || 1,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: payload.title || '',
+        });
+      } catch (e) {
+        console.error('addPriceLine error', e);
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (!msg || !msg.type) return;
+      if (msg.type === 'setData') {
+        setData(msg.payload || []);
+      } else if (msg.type === 'setPriceLine') {
+        addPriceLine(msg.id || 'price', msg.payload || {});
+      }
+    });
+  </script>
+</body>
+</html>

@@ -10,6 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.6
+  candlesticks: ^2.1.0
+  webview_flutter: ^4.10.0
+  webview_flutter_android: ^4.10.11
   dio: ^5.4.0
   flutter_secure_storage: ^9.2.2
   flutter_riverpod: ^2.5.1
@@ -39,5 +42,7 @@ flutter:
   assets:
     - assets/env
     - assets/env.example
+    - assets/web/chart.html
+    - assets/web/lightweight-charts.js
 
 
