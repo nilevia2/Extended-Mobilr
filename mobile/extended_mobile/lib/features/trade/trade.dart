@@ -16,6 +16,7 @@ class _TradePageState extends ConsumerState<TradePage> {
   String _candleDebug = '';
   int _candleRenderVersion = 0;
   bool _candleReconnecting = false;
+  int _candleSession = 0; // Increment to invalidate old sockets when switching
 
   bool _loading = false;
   String? _error;
@@ -261,12 +262,18 @@ class _TradePageState extends ConsumerState<TradePage> {
   }
 
   void _subscribeCandleStream({String? marketOverride}) {
+    // Bump session to ensure old sockets won't reconnect after market change
+    _candleSession++;
+    final currentSession = _candleSession;
+
     final market = marketOverride ?? _selectedMarket;
     final interval = _quickIntervals[_selectedIntervalLabel] ?? _moreIntervals[_selectedIntervalLabel] ?? 'PT1H';
     final type = _selectedCandleType;
 
     _candleSocket?.close();
+    _candleSocket = null;
     _candleReconnectTimer?.cancel();
+    _candleReconnectTimer = null;
     _candleMsgCount = 0;
     _candleReconnectAttempts = 0;
     _candleDebug = 'connecting...';
@@ -283,41 +290,55 @@ class _TradePageState extends ConsumerState<TradePage> {
               'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36',
         },
       ).then((ws) {
+        // Drop stale connections if a newer session already started
+        if (!mounted || currentSession != _candleSession) {
+          ws.close();
+          return;
+        }
+
         _candleSocket = ws;
         if (mounted) setState(() => _candleDebug = 'connected');
         ws.listen(
-          (event) => _handleCandleMessage(event),
+          (event) {
+            if (currentSession != _candleSession) return;
+            _handleCandleMessage(event);
+          },
           onError: (e) {
             debugPrint('[CANDLE_WS] error: $e');
+            if (currentSession != _candleSession) return;
             if (mounted) setState(() => _candleDebug = 'error: $e');
-            _scheduleCandleReconnect();
+            _scheduleCandleReconnect(currentSession);
           },
           onDone: () {
             debugPrint('[CANDLE_WS] closed code=${ws.closeCode} reason=${ws.closeReason}');
+            if (currentSession != _candleSession) return;
             if (mounted) {
               setState(() => _candleDebug = 'closed ${ws.closeCode ?? ''} ${ws.closeReason ?? ''}');
             }
-            _scheduleCandleReconnect();
+            _scheduleCandleReconnect(currentSession);
           },
           cancelOnError: true,
         );
       }).catchError((e) {
         debugPrint('[CANDLE_WS] connect failed: $e');
+        if (currentSession != _candleSession) return;
         if (mounted) setState(() => _candleDebug = 'connect failed: $e');
-        _scheduleCandleReconnect();
+        _scheduleCandleReconnect(currentSession);
       });
     } catch (e) {
       debugPrint('[CANDLE_WS] connect failed: $e');
+      if (currentSession != _candleSession) return;
       if (mounted) setState(() => _candleDebug = 'connect failed: $e');
-      _scheduleCandleReconnect();
+      _scheduleCandleReconnect(currentSession);
     }
   }
 
-  void _scheduleCandleReconnect() {
+  void _scheduleCandleReconnect(int sessionId) {
     _candleReconnectTimer?.cancel();
     _candleReconnectAttempts++;
     final delay = Duration(seconds: (_candleReconnectAttempts * 3).clamp(3, 30));
     _candleReconnectTimer = Timer(delay, () {
+      if (sessionId != _candleSession) return;
       if (!mounted) return;
       _subscribeCandleStream();
     });
