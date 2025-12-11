@@ -143,12 +143,21 @@ class _TradePageState extends ConsumerState<TradePage> {
       final asks = (obData?['asks'] as List<dynamic>? ?? []).take(10).map((e) => (e as List<dynamic>).toList()).toList();
       final bids = (obData?['bids'] as List<dynamic>? ?? []).take(10).map((e) => (e as List<dynamic>).toList()).toList();
 
+      // Chart library expects newest FIRST (index 0 = newest, rightmost on chart)
+      // API returns newest first, so we can use it directly
+      // Debug: Log API data
+      if (candles.isNotEmpty) {
+        final first = candles.first;
+        final last = candles.last;
+        debugPrint('[API_DATA] Total: ${candles.length}, First (newest): ${first['T'] ?? first['t']} close=${first['c'] ?? first['close']}, Last (oldest): ${last['T'] ?? last['t']} close=${last['c'] ?? last['close']}');
+      }
+
       if (!mounted) return;
       setState(() {
         _selectedMarket = market;
         _stats = statsData;
         _leverage = selectedLeverage != null ? _formatLeverage(selectedLeverage) : null;
-        _candles = candles;
+        _candles = candles; // API already returns newest first, use as-is
         _asks = asks;
         _bids = bids;
       });
@@ -218,7 +227,9 @@ class _TradePageState extends ConsumerState<TradePage> {
       return DateTime.fromMillisecondsSinceEpoch(ms.toInt());
     }
 
-    return _candles.map((c) {
+    // Chart library expects newest FIRST (index 0 = newest, rightmost)
+    // _candles is already stored newest first, so use directly
+    final chartCandles = _candles.map((c) {
       double safeNum(dynamic v) {
         final d = toDouble(v);
         if (d.isNaN || d.isInfinite) return 0.0;
@@ -233,6 +244,13 @@ class _TradePageState extends ConsumerState<TradePage> {
         volume: safeNum(c['v'] ?? c['volume'] ?? 0),
       );
     }).toList();
+    
+    // Debug: Log chart data
+    if (chartCandles.isNotEmpty) {
+      debugPrint('[CHART_DATA] Total: ${chartCandles.length}, First (newest): ${chartCandles.first.date} close=${chartCandles.first.close}, Last (oldest): ${chartCandles.last.date} close=${chartCandles.last.close}');
+    }
+    
+    return chartCandles;
   }
 
   String _wsBaseUrl() {
@@ -348,36 +366,42 @@ class _TradePageState extends ConsumerState<TradePage> {
 
       final updated = List<Map<String, dynamic>>.from(_candles);
       if (tsKey != null) {
-        final existingIdx = updated.lastIndexWhere(
+        // Find existing candle by timestamp (newest first, so check from start)
+        final existingIdx = updated.indexWhere(
           (c) => (c['T'] ?? c['t'] ?? c['time'] ?? c['timestamp']).toString() == tsKey,
         );
         if (existingIdx >= 0) {
           updated[existingIdx] = normalized;
         } else {
-          updated.add(normalized);
+          // New candle - insert at beginning (newest first)
+          updated.insert(0, normalized);
           if (updated.length > 400) {
-            updated.removeAt(0);
+            updated.removeLast(); // Remove oldest (last item)
           }
         }
       } else {
-        updated.add(normalized);
+        updated.insert(0, normalized);
         if (updated.length > 400) {
-          updated.removeAt(0);
+          updated.removeLast();
         }
       }
 
-      // Ensure chronological order for the chart
+      // Sort to maintain newest first order (descending timestamp)
       updated.sort((a, b) {
         final at = _num(a['T'] ?? a['t'] ?? a['time'] ?? a['timestamp']);
         final bt = _num(b['T'] ?? b['t'] ?? b['time'] ?? b['timestamp']);
-        return at.compareTo(bt);
+        return bt.compareTo(at); // Descending: newest first
       });
 
-      _candles = updated;
       if (mounted) {
-        final latestClose = _candles.isNotEmpty ? _candles.last['c'] : null;
+        final latestClose = updated.isNotEmpty ? updated.first['c'] : null; // First = newest
+        // Debug: Log WS data
+        if (updated.isNotEmpty) {
+          debugPrint('[WS_DATA] Total: ${updated.length}, First (newest): ${updated.first['T'] ?? updated.first['t']} close=${updated.first['c']}, Last (oldest): ${updated.last['T'] ?? updated.last['t']} close=${updated.last['c']}');
+          debugPrint('[WS_DATA] New candle: T=${normalized['T']} close=${normalized['c']}');
+        }
         setState(() {
-          _candles = List<Map<String, dynamic>>.from(_candles);
+          _candles = updated;
           _candleRenderVersion++;
           _candleDebug = 'msg $_candleMsgCount ${_selectedCandleType} close=${latestClose ?? '--'}';
         });
